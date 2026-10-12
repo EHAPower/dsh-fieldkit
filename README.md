@@ -21,16 +21,27 @@ dsh plugin --profile fieldkit add /absolute/path/to/ehapower-dsh-fieldkit-0.2.0.
 
 本包提供专用 `fieldkit` Agent preset，关闭此 profile 中的通用编程 preset，不加载工作区指令、文件扫描或 Shell 工具。建议用于独立 profile。
 
-先从公开 SDK 构建官方工具：
+先从公开 SDK 的最新 `main` 构建官方工具。首次克隆时：
 
 ```sh
 git clone https://github.com/EHAPower/eha-sdk.git
 cd eha-sdk
-git checkout 0fc8a52e644fba360ac52bfb70569a768057e80d
+git fetch origin
+git checkout main
+git pull --ff-only
 cargo build -p eha-tool --release --locked
 ```
 
-此版本的适配基线为上述公开提交，当前只支持 Harness `0.2.0-rc.2`。部署时若 `@deepseek-ai/dsh@latest` 已升级到其他版本，需要先发布匹配该版本的适配更新；不要跳过 peer 兼容检查。
+已有 SDK 克隆（包括当前处于 detached HEAD 的克隆）时，进入该目录后运行：
+
+```sh
+git fetch origin
+git checkout main
+git pull --ff-only
+cargo build -p eha-tool --release --locked
+```
+
+当前只支持 Harness `0.2.0-rc.2`。部署时若 `@deepseek-ai/dsh@latest` 已升级到其他版本，需要先发布匹配该版本的适配更新；不要跳过 peer 兼容检查。
 
 然后在 Harness 的 Plugins / Settings 界面打开本地 `fieldkit` 配置行，填写：
 

@@ -8,7 +8,7 @@ export async function writeReport(reportsDir, diagnosis) {
   const report = {
     formatVersion: 1,
     generatedAt: new Date().toISOString(),
-    sdkReference: 'https://github.com/EHAPower/eha-sdk/tree/0fc8a52e644fba360ac52bfb70569a768057e80d',
+    sdkReference: 'https://github.com/EHAPower/eha-sdk',
     scope: 'Separate read-only USB snapshots; not a continuous recording or a safety certificate.',
     diagnosis,
   }
