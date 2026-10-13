@@ -148,6 +148,137 @@ test('blocked release retains leases and explicit revoke preserves maintenance w
   assert.equal(x.calls.filter(v => v[0] === 'stop').length, 0)
 })
 
+test('confirmed single-scope revoke retires its reservation before observer cleanup without clearing unknown evidence', async () => {
+  for (const unknown of [false, true]) {
+    const x = setup(), scope = await x.scope()
+    if (unknown) x.client.controlCommand = async () => { throw error('sdk_timeout') }
+    await x.service.submitControl('chat', { scopeId: scope.scopeId, command: { action: 'heartbeat_once' } })
+    const original = (await x.service.controlContext('chat')).scopes[0].latest
+    const permission = x.client.controlPermission
+    let retired = false, releases = 0
+    x.client.controlPermission = async (...args) => { const result = await permission(...args); if (!args[1].control) retired = true; return result }
+    x.client.releaseControlReservation = async () => { releases++; if (retired) throw error('reservation_unknown'); return { blocked: [] } }
+    await x.service.revokeControlScope('chat', scope.scopeId)
+    const released = await x.service.releaseControlScope('chat', scope.scopeId)
+    assert.equal(releases, 0, 'the confirmed retired reservation is never deleted again')
+    assert.equal(released.state, 'released')
+    assert.equal(released.controlReady, false)
+    assert.equal(released.stopAvailable, false)
+    assert.deepEqual(released.latest, original)
+    assert.equal(released.latest.unknown, unknown)
+    assert.equal(x.calls.filter(v => v[0] === 'detach').length, 1)
+    assert.equal(x.calls.filter(v => v[0] === 'renew').length, 0)
+    assert.equal(x.calls.filter(v => v[0] === 'stop' || v[0] === 'original').length, 0)
+  }
+})
+
+test('unconfirmed revoke never treats a missing reservation as confirmed cleanup', async () => {
+  const x = setup(), scope = await x.scope()
+  x.client.controlPermission = async () => { throw Object.assign(error('sdk_timeout'), { unknown: true }) }
+  x.client.releaseControlReservation = async () => { throw error('reservation_unknown') }
+  const revoked = await x.service.revokeControlScope('chat', scope.scopeId)
+  assert.match(revoked.reason, /授权撤销未确认/)
+  await assert.rejects(x.service.releaseControlScope('chat', scope.scopeId), { code: 'reservation_unknown' })
+  assert.equal((await x.service.controlContext('chat')).scopes[0].state, 'active')
+  assert.equal(x.calls.filter(v => v[0] === 'detach').length, 0)
+})
+
+test('late single reservation response cannot restore a confirmed revoked scope', async () => {
+  const x = setup()
+  let started, respond
+  const waiting = new Promise(resolve => { started = resolve })
+  x.client.controlReservation = async () => { started(); return new Promise(resolve => { respond = resolve }) }
+  let releases = 0
+  x.client.releaseControlReservation = async () => { releases++; throw error('reservation_unknown') }
+  const creating = x.scope()
+  await waiting
+  const early = (await x.service.controlContext('chat')).scopes[0]
+  await x.service.revokeControlScope('chat', early.scopeId)
+  respond({ reservationId: 'retired-r', controlEpoch: '1' })
+  const scope = await creating
+  assert.equal(scope.controlGranted, false)
+  assert.equal(scope.controlReady, false)
+  const released = await x.service.releaseControlScope('chat', scope.scopeId)
+  assert.equal(releases, 0)
+  assert.equal(released.state, 'released')
+  assert.equal(x.calls.filter(v => v[0] === 'detach').length, 1)
+  assert.equal(x.calls.filter(v => v[0] === 'stop' || v[0] === 'command').length, 0)
+})
+
+test('late single reservation after uncertain or in-flight revoke never restores ordinary readiness', async () => {
+  for (const duringRevoke of [false, true]) {
+    const x = setup()
+    let started, respond, entered, rejectPermission
+    const waiting = new Promise(resolve => { started = resolve })
+    const revoking = new Promise(resolve => { entered = resolve })
+    x.client.controlReservation = async () => { started(); return new Promise(resolve => { respond = resolve }) }
+    const creating = x.scope()
+    await waiting
+    const early = (await x.service.controlContext('chat')).scopes[0]
+    x.client.controlPermission = async () => {
+      entered()
+      if (duringRevoke) return new Promise((_resolve, reject) => { rejectPermission = reject })
+      throw Object.assign(error('sdk_timeout'), { unknown: true })
+    }
+    const revoke = x.service.revokeControlScope('chat', early.scopeId)
+    await revoking
+    if (!duringRevoke) await revoke
+    respond({ reservationId: 'unconfirmed-r', controlEpoch: '1' })
+    const scope = await creating
+    assert.equal(scope.controlReady, false)
+    if (duringRevoke) { rejectPermission(Object.assign(error('sdk_timeout'), { unknown: true })); await revoke }
+    x.client.releaseControlReservation = async () => { throw error('reservation_unknown') }
+    await assert.rejects(x.service.releaseControlScope('chat', scope.scopeId), { code: 'reservation_unknown' })
+    assert.equal(x.calls.filter(v => v[0] === 'detach' || v[0] === 'stop' || v[0] === 'command').length, 0)
+  }
+})
+
+test('late group reservation keeps cleanup metadata without reviving confirmed revoked control or Stop', async () => {
+  const x = setup(), { candidates } = await x.service.controlCandidates('chat')
+  let started, respond
+  const waiting = new Promise(resolve => { started = resolve })
+  x.client.createControlGroup = async (_instance, bindings) => {
+    started()
+    return new Promise(resolve => { respond = () => resolve({ groupId: 'group', reservationId: 'group-r', stopRequestId: 'group-stop', members: bindings.map(b => ({ bindingId: b.binding_id, controlEpoch: '1', stopRequestId: `stop-${b.binding_id}` })) }) })
+  }
+  const creating = x.service.createControlScope('chat', { candidateIds: candidates.map(c => c.candidateId) })
+  await waiting
+  const early = (await x.service.controlContext('chat')).scopes[0]
+  await x.service.revokeControlScope('chat', early.scopeId)
+  respond()
+  const scope = await creating
+  assert.equal(scope.controlGranted, false)
+  assert.equal(scope.controlReady, false)
+  assert.equal(scope.stopAvailable, false)
+  assert.match(scope.stopReason, /授权已撤销/)
+  const releasedIds = []
+  x.client.releaseControlGroup = async (_instance, groupId) => { releasedIds.push(groupId); return { blocked: [] } }
+  const released = await x.service.releaseControlScope('chat', scope.scopeId)
+  assert.deepEqual(releasedIds, ['group'])
+  assert.equal(released.state, 'released')
+  assert.equal(x.calls.filter(v => v[0] === 'detach').length, 2)
+  assert.equal(x.calls.filter(v => v[0] === 'stop' || v[0] === 'command').length, 0)
+})
+
+test('confirmed revoke cleanup still enforces session instance and reports failed detach', async () => {
+  const x = setup(), scope = await x.scope()
+  await x.service.revokeControlScope('chat', scope.scopeId)
+  await assert.rejects(x.service.releaseControlScope('other', scope.scopeId), { code: 'not_found' })
+  assert.equal(x.calls.filter(v => v[0] === 'detach').length, 0)
+  x.client.detach = async b => { x.calls.push(['detach', b]); throw error('sdk_timeout') }
+  const released = await x.service.releaseControlScope('chat', scope.scopeId)
+  assert.match(released.reason, /观察引用解除未确认/)
+  assert.doesNotMatch(released.reason, /观察引用已解除/)
+  const y = setup(), old = await y.scope()
+  await y.service.revokeControlScope('chat', old.scopeId)
+  let calls = 0
+  y.client.releaseControlReservation = async () => { calls++; throw error('reservation_unknown') }
+  y.descriptions.instance_id = 'another-instance'
+  await assert.rejects(y.service.releaseControlScope('chat', old.scopeId), { code: 'instance_mismatch' })
+  assert.equal(calls, 0)
+  assert.equal((await y.service.controlContext('chat')).scopes[0].state, 'expired')
+})
+
 test('ticket preparation timeout is known never-submitted and does not fabricate an operation ID', async () => {
   const x = setup(), scope = await x.scope(); x.client.controlTicket = async () => { throw error('sdk_timeout') }
   const result = await x.service.submitControl('chat', { scopeId: scope.scopeId, command: { action: 'heartbeat_once' } })

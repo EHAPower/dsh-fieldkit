@@ -248,13 +248,18 @@ export function createP4Service({ mode, session, attach, http, currentInstance =
         scope.stopReason = scope.stopAvailable ? null : scope.stopReason
         if (scope.members.length === 1) {
           scope.stopRequestId = scope.members[0].stopRequestId; scope.stopAvailable = !!scope.stopRequestId; scope.stopReason = scope.stopAvailable ? null : scope.stopReason
-          try { const r = await scope.client.controlReservation(scope.members[0].binding, s); scope.reservationId = r.reservationId; scope.members[0].controlEpoch = r.controlEpoch; requireActive(); scope.controlReady = !scope.stopRequested }
+          try {
+            const r = await scope.client.controlReservation(scope.members[0].binding, s)
+            if (scope.controlGranted !== false) { scope.reservationId = r.reservationId; scope.members[0].controlEpoch = r.controlEpoch }
+            requireActive(); scope.controlReady = !scope.stopRequested && scope.controlGranted !== false && !scope.flight && scope.reason === null && scope.state === 'active'
+          }
           catch (e) { if (disposed) throw e; scope.reason = `普通控制占用未取得：${e.message}；已授权的原范围 Stop 独立可用。` }
         } else {
           const group = await scope.client.createControlGroup(scope.instanceId, scope.members.map(m => m.binding), s)
           scope.groupId = group.groupId; scope.reservationId = group.reservationId; scope.stopRequestId = group.stopRequestId
           for (const m of scope.members) { const saved = group.members.find(v => v.bindingId === m.binding.binding_id); if (!saved) fail('invalid_response', '服务群组遗漏原成员。'); m.controlEpoch = saved.controlEpoch; m.stopRequestId = saved.stopRequestId }
-          requireActive(); scope.controlReady = !scope.stopRequested; scope.stopAvailable = true; scope.stopReason = null
+          requireActive(); scope.controlReady = !scope.stopRequested && scope.controlGranted !== false && !scope.flight && scope.reason === null && scope.state === 'active'
+          if (scope.controlGranted !== false && scope.state === 'active') { scope.stopAvailable = true; scope.stopReason = null }
         }
         renew(scope); return view(scope)
       } catch (e) {
@@ -329,7 +334,11 @@ export function createP4Service({ mode, session, attach, http, currentInstance =
           finally { if (temporary) try { await scope.client.detach(temporary) } catch (e) { notes.push(`${m.binding.target_id} 临时观察解除未确认：${e.code ?? 'backend_error'} ${e.message}；等待租约回收`) } }
         }
         scope.reason = `${notes.join('；')}。没有请求 Stop 或断连，旧普通范围不会恢复。`
-        if (revoked === scope.members.length) { scope.controlGranted = false; scope.stopAvailable = false; scope.stopReason = '此范围 control 授权已撤销；Stop 需要重新明确人工授权原范围。' }
+        if (revoked === scope.members.length) {
+          // The confirmed permission CAS already retired this single-member reservation.
+          if (scope.members.length === 1) scope.reservationId = null
+          scope.controlGranted = false; scope.stopAvailable = false; scope.stopReason = '此范围 control 授权已撤销；Stop 需要重新明确人工授权原范围。'
+        }
         return view(scope)
       } finally { scope.flight = false }
     },
