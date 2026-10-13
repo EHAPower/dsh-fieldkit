@@ -10,12 +10,13 @@ const error = code => Object.assign(new Error(code), { code })
 function setup(recoveryJournal = { prepare: async () => 'synthetic-record', complete: async () => {} }) {
   const gate = { hold: false }, calls = [], timers = [], bindings = [], descriptions = { instance_id: 'i', capabilities: ['control', 'control_groups', 'trials', 'recording_write', 'control_scopes'] }
   let serial = 0
+  const permissions = new Map()
   const receipt = (binding, intent, action) => ({ operationId: intent.operationId, claimantId: intent.claimantId, action, controlEpoch: '1', members: [{ targetId: binding.target_id, identity: { uid: binding.identity.uid, runNonce: binding.identity.run_nonce }, connectionGeneration: '1' }], admission: 'finished', submission: 'locally_submitted', controlEffect: 'known', observation: 'unconfirmed', phase: 'submission', nativeJsonText: '{"n":18446744073709551615}', error: null, newSubmission: true })
   const client = {
     targets: async () => ({ instance_id: descriptions.instance_id, targets: ['usb', 'can:1'].map((target_id, i) => ({ target_id, connected: true, can_attach: true, identity: { uid: `u${i}`, run_nonce: 'n' }, connection_generation: '1' })) }),
     bind: async request => { calls.push(['bind', request]); const b = { ...request, binding_id: `b${bindings.length}`, identity: request.expected_identity }; bindings.push(b); return b },
-    permissionView: async () => ({ maintenance: true, control: false, grantId: 'old' }),
-    controlPermission: async (b, p, cas) => { calls.push(['permission', p, cas]); return { grantId: 'g', controlEpoch: '1', stopRequestId: `stop-${b.binding_id}` } },
+    permissionView: async b => permissions.get(b.binding_id) ?? ({ maintenance: true, control: false, grantId: 'old' }),
+    controlPermission: async (b, p, cas) => { calls.push(['permission', p, cas]); const value = { ...p, grantId: 'g', controlEpoch: p.control ? '1' : null, stopRequestId: p.control ? `stop-${b.binding_id}` : null }; permissions.set(b.binding_id, value); return value },
     controlReservation: async () => ({ reservationId: 'r', controlEpoch: '1' }),
     controlTicket: async () => ({ operationId: `op${++serial}`, controlEpoch: '1' }),
     controlCommand: async (b, intent) => { calls.push(['command', intent]); return receipt(b, intent, intent.command.action) },
@@ -144,7 +145,7 @@ test('blocked release retains leases and explicit revoke preserves maintenance w
   await x.timers.shift()(); assert.equal(x.calls.filter(v => v[0] === 'renew').length, 1)
   const revoked = await x.service.revokeControlScope('chat', scope.scopeId)
   assert.equal(revoked.controlReady, false); assert.equal(revoked.stopAvailable, false)
-  assert.deepEqual(x.calls.filter(v => v[0] === 'permission').at(-1), ['permission', { maintenance: true, control: false }, 'old'])
+  assert.deepEqual(x.calls.filter(v => v[0] === 'permission').at(-1), ['permission', { maintenance: true, control: false }, 'g'])
   assert.equal(x.calls.filter(v => v[0] === 'stop').length, 0)
 })
 
@@ -626,4 +627,89 @@ test('a partially refused group trial still reads every original member and reta
   assert.deepEqual(readIds, ['trial-0', 'trial-1']); assert.notEqual(observed.state, 'not_submitted')
   assert.equal(observed.stopAvailable, true); assert.equal(observed.statusRead, 'unavailable')
   assert.equal(observed.results[1].trialState, 'active'); assert.equal(observed.results[1].trialNativeJsonText, 'ACTIVE_SECOND_MEMBER')
+})
+
+test('shared grant rotation disables old ordinary reservation but preserves the exact authorized Stop', async () => {
+  const x = setup(), fixed = await x.scope(), original = fixed.members[0]
+  x.client.permissionView = async () => ({ grantId: 'new-maintenance-grant', maintenance: false, control: true, controlEpoch: original.controlEpoch, stopRequestId: original.stopRequestId })
+  const context = await x.service.controlContext('chat'), changed = context.scopes[0]
+  assert.equal(changed.controlReady, false); assert.equal(changed.stopAvailable, true)
+  assert.deepEqual(changed.members, fixed.members); assert.match(changed.reason, /原.*占用.*失效/)
+  const refused = await x.service.submitControl('chat', { scopeId: fixed.scopeId, command: { action: 'position', mm: '1' } })
+  assert.equal(refused.results[0].submission, 'not_submitted'); assert.equal(x.calls.some(v => v[0] === 'command'), false)
+  assert.equal((await x.service.stopControlScope('chat', fixed.scopeId)).results[0].operationId, original.stopRequestId)
+})
+test('model ordinary submission checks permissions without preceding context refresh', async () => {
+  const x = setup(), fixed = await x.scope(), original = fixed.members[0]
+  x.client.permissionView = async () => ({ grantId: 'new', maintenance: false, control: true, controlEpoch: original.controlEpoch, stopRequestId: original.stopRequestId })
+  const tools = await createControlTools(x.service), output = await tools.find(v => v.name === 'fieldkit_control').execute({ scopeId: fixed.scopeId, command: { action: 'position', mm: '1' } }, { agent: { id: 'chat' } })
+  assert.equal(output.results[0].submission, 'not_submitted'); assert.equal(output.unknown, false)
+  assert.equal(x.calls.some(v => v[0] === 'command'), false)
+})
+test('unconfirmed permission is temporary ordinary gate and cannot delay or disable Stop', async () => {
+  const x = setup(), fixed = await x.scope(); let reject
+  x.client.permissionView = () => new Promise((_, r) => { reject = r })
+  const checking = x.service.controlContext('chat'); await new Promise(r => setImmediate(r))
+  const stopped = await x.service.stopControlScope('chat', fixed.scopeId)
+  assert.equal(stopped.results[0].submission, 'locally_submitted')
+  reject(error('sdk_timeout')); const context = await checking
+  assert.equal(context.scopes[0].stopAvailable, true); assert.equal(context.scopes[0].controlReady, false)
+  assert.match(context.scopes[0].reason, /已请求原范围 Stop/)
+  const y = setup(), other = await y.scope()
+  y.client.permissionView = async () => { throw error('sdk_timeout') }
+  const unknown = (await y.service.controlContext('chat')).scopes[0]
+  assert.equal(unknown.controlReady, false); assert.equal(unknown.stopAvailable, true); assert.match(unknown.reason, /授权未确认/)
+  assert.equal((await y.service.submitControl('chat', { scopeId: other.scopeId, command: { action: 'heartbeat_once' } })).results[0].submission, 'not_submitted')
+  const original = other.members[0]
+  y.client.permissionView = async () => ({ grantId: original.grantId, maintenance: true, control: true, controlEpoch: original.controlEpoch, stopRequestId: original.stopRequestId })
+  assert.equal((await y.service.controlContext('chat')).scopes[0].controlReady, true)
+})
+test('known permission change preserves unknown evidence and never restores the original ordinary reservation', async () => {
+  const x = setup(), fixed = await x.scope(), original = fixed.members[0]
+  x.client.controlCommand = async () => { throw error('sdk_timeout') }
+  await x.service.submitControl('chat', { scopeId: fixed.scopeId, command: { action: 'position', mm: '1' } })
+  x.client.permissionView = async () => ({ grantId: null, maintenance: false, control: false, controlEpoch: null, stopRequestId: null })
+  const changed = (await x.service.controlContext('chat')).scopes[0]
+  assert.equal(changed.stopAvailable, false); assert.equal(changed.latest.unknown, true)
+  assert.match(changed.reason, /未知/)
+  x.client.permissionView = async () => { throw error('sdk_timeout') }
+  assert.equal((await x.service.controlContext('chat')).scopes[0].stopAvailable, false)
+  x.client.permissionView = async () => ({ grantId: 'new-human-grant', maintenance: true, control: true, controlEpoch: original.controlEpoch, stopRequestId: original.stopRequestId })
+  const reconfirmed = (await x.service.controlContext('chat')).scopes[0]
+  assert.equal(reconfirmed.stopAvailable, true); assert.equal(reconfirmed.controlReady, false); assert.equal(reconfirmed.latest.unknown, true)
+  x.client.permissionView = async () => ({ grantId: 'new-human-grant', maintenance: true, control: true, controlEpoch: '999', stopRequestId: 'different-canonical' })
+  assert.equal((await x.service.controlContext('chat')).scopes[0].stopAvailable, false)
+  assert.deepEqual(reconfirmed.members, fixed.members)
+})
+
+test('permission GET started during revoke cannot restore revoked Stop when it resolves late', async () => {
+  const x = setup(), fixed = await x.scope(), original = fixed.members[0]; let finishRevoke, finishRead
+  x.client.controlPermission = () => new Promise(resolve => { finishRevoke = resolve })
+  const revoking = x.service.revokeControlScope('chat', fixed.scopeId); await new Promise(r => setImmediate(r))
+  x.client.permissionView = () => new Promise(resolve => { finishRead = resolve })
+  const reading = x.service.controlContext('chat'); await new Promise(r => setImmediate(r))
+  finishRevoke({ maintenance: true, control: false, grantId: 'new' }); await revoking
+  finishRead({ maintenance: true, control: true, grantId: original.grantId, controlEpoch: original.controlEpoch, stopRequestId: original.stopRequestId })
+  const context = await reading
+  assert.equal(context.scopes[0].controlGranted, false); assert.equal(context.scopes[0].stopAvailable, false); assert.equal(context.scopes[0].controlReady, false)
+})
+test('late older permissions cannot override a newer shared grant observation', async () => {
+  const x = setup(), fixed = await x.scope(), original = fixed.members[0]; let finish, reads = 0
+  x.client.permissionView = () => ++reads === 1 ? new Promise(resolve => { finish = resolve }) : Promise.resolve({ maintenance: false, control: true, grantId: 'rotated', controlEpoch: original.controlEpoch, stopRequestId: original.stopRequestId })
+  const old = x.service.controlContext('chat'); await new Promise(r => setImmediate(r))
+  const latest = await x.service.controlContext('chat'); assert.equal(latest.scopes[0].controlReady, false)
+  finish({ maintenance: true, control: true, grantId: original.grantId, controlEpoch: original.controlEpoch, stopRequestId: original.stopRequestId })
+  const stale = await old
+  assert.equal(stale.scopes[0].controlReady, false); assert.equal(stale.scopes[0].stopAvailable, true); assert.deepEqual(stale.scopes[0].members, fixed.members)
+})
+test('one rotated group member disables the whole old reservation while preserving every original Stop member', async () => {
+  const x = setup()
+  x.client.createControlGroup = async (_i, bindings) => ({ groupId: 'group', reservationId: 'r', stopRequestId: 'group-stop', members: bindings.map(b => ({ bindingId: b.binding_id, controlEpoch: '1', stopRequestId: `stop-${b.binding_id}` })) })
+  const { candidates } = await x.service.controlCandidates('chat'), fixed = await x.service.createControlScope('chat', { candidateIds: candidates.map(c => c.candidateId) })
+  x.client.permissionView = async b => ({ maintenance: true, control: true, grantId: b.binding_id === 'b0' ? 'rotated' : 'g', controlEpoch: '1', stopRequestId: `stop-${b.binding_id}` })
+  x.client.stopGroup = async () => ({ members: x.bindings.map(b => ({ bindingId: b.binding_id, operation: x.receipt(b, { operationId: `stop-${b.binding_id}`, claimantId: 'chat' }, 'stop'), error: null })) })
+  const changed = (await x.service.controlContext('chat')).scopes[0]
+  assert.equal(changed.controlReady, false); assert.equal(changed.stopAvailable, true); assert.deepEqual(changed.members, fixed.members)
+  const stopped = await x.service.stopControlScope('chat', fixed.scopeId)
+  assert.deepEqual(stopped.results.map(v => v.operationId), fixed.members.map(v => v.stopRequestId)); assert.equal(stopped.results.length, 2)
 })

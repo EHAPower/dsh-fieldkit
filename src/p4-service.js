@@ -29,7 +29,7 @@ export function createP4Service({ mode, session, attach, http, currentInstance =
   function context(s) { session(s); if (!contexts.has(s)) contexts.set(s, { candidates: new Map(), scopes: [], activeScopeId: null }); return contexts.get(s) }
   async function ready(s, capability) { context(s); if (disposed) fail('disposed', '控制引用已释放。'); if (mode !== 'service-v2') fail('unsupported', '控制需要 service-v2。'); const d = await attach(); requireActive(); if (capability && !d.capabilities.includes(capability)) fail('unsupported', `服务未发布 ${capability}；不执行设备动作。`); return d }
   function registered(s, id) { const value = scopes.get(id); if (!value || value.sessionId !== s) fail('not_found', '当前对话未登记该固定控制范围。'); return value }
-  function view(value) { return structuredClone({ scopeId: value.id, instanceId: value.instanceId, members: value.members.map(m => ({ target: target(value.instanceId, m.binding), grantId: m.grantId, controlEpoch: m.controlEpoch, stopRequestId: m.stopRequestId })), kind: value.members.length === 1 ? 'single' : 'group', state: value.state, controlReady: value.controlReady, controlGranted: value.controlGranted !== false, reason: value.reason, stopAvailable: value.stopAvailable, stopReason: value.stopReason, latest: value.latest, lastOrdinary: value.lastOrdinary ?? null, trial: value.trial && value.state === 'expired' ? { ...value.trial, statusRead: 'historical', statusReason: value.reason, stopAvailable: false } : value.trial, recordings: value.recordings }) }
+  function view(value) { return structuredClone({ scopeId: value.id, instanceId: value.instanceId, members: value.members.map(m => ({ target: target(value.instanceId, m.binding), grantId: m.grantId, controlEpoch: m.controlEpoch, stopRequestId: m.stopRequestId })), kind: value.members.length === 1 ? 'single' : 'group', state: value.state, controlReady: value.controlReady && !value.permissionInvalid && !value.permissionError, controlGranted: value.controlGranted !== false, reason: [value.reason, value.permissionError].filter(Boolean).join('；') || null, stopAvailable: value.stopAvailable, stopReason: value.stopReason, latest: value.latest, lastOrdinary: value.lastOrdinary ?? null, trial: value.trial && value.state === 'expired' ? { ...value.trial, statusRead: 'historical', statusReason: value.reason, stopAvailable: false } : value.trial, recordings: value.recordings }) }
   function renew(scope, delay = 30000) {
     if (disposed || scope.observerReleased || scope.state === 'expired') return
     scope.timer = schedule(async () => {
@@ -45,12 +45,37 @@ export function createP4Service({ mode, session, attach, http, currentInstance =
     if (!scope.detaching) scope.detaching = Promise.allSettled(scope.members.map(m => scope.client.detach(m.binding)))
     await scope.detaching
   }
+  async function refreshPermissions(scope) {
+    // Released observers need no new binding; their original Stop remains an explicit SDK attempt.
+    if (disposed || scope.state !== 'active' || scope.observerReleased) return false
+    const revision = scope.permissionReadRevision = (scope.permissionReadRevision ?? 0) + 1
+    const original = JSON.stringify(scope.members.map(m => ({ target: target(scope.instanceId, m.binding), grantId: m.grantId, controlEpoch: m.controlEpoch, stopRequestId: m.stopRequestId })))
+    const outcomes = await Promise.allSettled(scope.members.map(m => scope.client.permissionView(m.binding)))
+    if (disposed || scope.state !== 'active' || scope.observerReleased || scope.permissionReadRevision !== revision || original !== JSON.stringify(scope.members.map(m => ({ target: target(scope.instanceId, m.binding), grantId: m.grantId, controlEpoch: m.controlEpoch, stopRequestId: m.stopRequestId })))) return false
+    const failures = outcomes.filter(v => v.status === 'rejected')
+    const known = outcomes.flatMap((v, i) => v.status === 'fulfilled' ? [{ value: v.value, member: scope.members[i] }] : [])
+    if (known.some(({ value, member }) => !value.control || value.grantId !== member.grantId || value.controlEpoch !== member.controlEpoch || value.stopRequestId !== member.stopRequestId)) {
+      scope.permissionInvalid = true; scope.controlReady = false
+      scope.reason ??= '原共享授权已变化，原普通控制占用已失效；不继承新 grant 或占用，请重新明确建立控制范围。'
+    }
+    const stopInvalid = known.some(({ value, member }) => !value.control || value.controlEpoch !== member.controlEpoch || value.stopRequestId !== member.stopRequestId)
+    if (stopInvalid) { scope.stopAvailable = false; scope.stopReason = '原范围 control 授权或 epoch / canonical Stop 编号已变化；不切换新范围。' }
+    else if (!failures.length) { scope.stopAvailable = true; scope.stopReason = null }
+    if (known.some(({ value }) => !value.control)) scope.controlGranted = false
+    else if (!failures.length) scope.controlGranted = true
+    scope.permissionError = failures.length ? `原范围授权未确认：${failures.map(v => `${v.reason.code ?? 'backend_error'} ${v.reason.message}`).join('；')}；新普通操作暂不可提交，Stop 权限与普通占用分开核对。` : null
+    return true
+  }
   async function scopeReady(s, scopeId, capability = 'control', stop = false) {
     const scope = registered(s, scopeId)
     if (disposed) fail('disposed', '控制引用已释放。')
     const instanceId = stop ? currentInstance() ?? scope.instanceId : (await ready(s, capability)).instance_id
     if (scope.instanceId !== instanceId) { await expireScope(scope, '原控制范围属于旧服务实例，不能向新实例重发。'); fail('instance_mismatch', scope.reason) }
-    if (!stop && (scope.stopRequested || !scope.controlReady || scope.state !== 'active')) fail('permission_denied', scope.reason ?? '原控制范围不可提交新目标。')
+    if (!stop) {
+      if (scope.stopRequested || !scope.controlReady || scope.permissionInvalid || scope.state !== 'active') fail('permission_denied', scope.reason ?? '原控制范围不可提交新目标。')
+      if (!await refreshPermissions(scope) || scope.permissionError) fail('permission_unconfirmed', scope.permissionError ?? '原授权读取已被较新读取或范围变更取代；普通操作未提交。')
+      if (disposed || scope.stopRequested || !scope.controlReady || scope.permissionInvalid || scope.state !== 'active') fail('permission_denied', scope.reason ?? '原控制范围不可提交新目标。')
+    }
     return scope
   }
   function project(scope, member, operation, error = null) {
@@ -139,7 +164,7 @@ export function createP4Service({ mode, session, attach, http, currentInstance =
     const recoveryRecordId = original.action !== 'stop' && scope.recoveryRecords?.get(original.results[0]?.operationId)
     if (recoveryRecordId) try { await recoveryJournal.complete(scope.sessionId, recoveryRecordId, next) } catch { /* History retains the original intent and reports update failure. */ }
     if (scope.stopResult?.results.every((r, i) => r.operationId === original.results[i]?.operationId)) scope.stopResult = next
-    if (original.results.some(r => r.unknownSource === 'transport') && refreshed.every(r => r.admission === 'finished' && r.submission === 'not_submitted' && !r.unknown) && !scope.stopRequested && scope.state === 'active' && scope.reservationId) { scope.controlReady = true; scope.reason = null }
+    if (original.results.some(r => r.unknownSource === 'transport') && refreshed.every(r => r.admission === 'finished' && r.submission === 'not_submitted' && !r.unknown) && !scope.stopRequested && scope.state === 'active' && scope.reservationId && !scope.permissionInvalid) { scope.controlReady = true; scope.reason = null }
   }
   function originalOperation(record, op, action, operationId) {
     const m = op.members[0], scope = record.scope
@@ -259,7 +284,7 @@ export function createP4Service({ mode, session, attach, http, currentInstance =
           scope.groupId = group.groupId; scope.reservationId = group.reservationId; scope.stopRequestId = group.stopRequestId
           for (const m of scope.members) { const saved = group.members.find(v => v.bindingId === m.binding.binding_id); if (!saved) fail('invalid_response', '服务群组遗漏原成员。'); m.controlEpoch = saved.controlEpoch; m.stopRequestId = saved.stopRequestId }
           requireActive(); scope.controlReady = !scope.stopRequested && scope.controlGranted !== false && !scope.flight && scope.reason === null && scope.state === 'active'
-          if (scope.controlGranted !== false && scope.state === 'active') { scope.stopAvailable = true; scope.stopReason = null }
+          if (scope.controlGranted !== false && !scope.permissionInvalid && scope.state === 'active') { scope.stopAvailable = true; scope.stopReason = null }
         }
         renew(scope); return view(scope)
       } catch (e) {
@@ -269,7 +294,7 @@ export function createP4Service({ mode, session, attach, http, currentInstance =
         throw e
       }
     },
-    async controlContext(s) { const d = await ready(s, null), c = context(s); for (const id of c.scopes) { const scope = scopes.get(id); if (scope.instanceId === d.instance_id) { await refreshScope(scope); if (scope.trial?.trialId && !scope.flight && !scope.stopFlight) await api.getControlTrial(s, scope.trial.trialId); if (d.capabilities.includes('recording_write') && !scope.flight) scope.recordings = await Promise.all(scope.members.map(async m => { try { return { target: target(scope.instanceId, m.binding), ...await scope.client.recordingStatus(m.binding), error: null } } catch (e) { return { target: target(scope.instanceId, m.binding), active: null, failed: null, recordingId: null, nativeJsonText: null, error: err(e) } } })) } else await expireScope(scope, '控制范围属于旧实例；不能恢复目标。') } return { capabilities: d.capabilities, scopes: c.scopes.map(id => view(scopes.get(id))), activeScopeId: c.activeScopeId } },
+    async controlContext(s) { const d = await ready(s, null), c = context(s); for (const id of c.scopes) { const scope = scopes.get(id); if (scope.instanceId === d.instance_id) { await refreshPermissions(scope); await refreshScope(scope); if (scope.trial?.trialId && !scope.flight && !scope.stopFlight) await api.getControlTrial(s, scope.trial.trialId); if (d.capabilities.includes('recording_write') && !scope.flight) scope.recordings = await Promise.all(scope.members.map(async m => { try { return { target: target(scope.instanceId, m.binding), ...await scope.client.recordingStatus(m.binding), error: null } } catch (e) { return { target: target(scope.instanceId, m.binding), active: null, failed: null, recordingId: null, nativeJsonText: null, error: err(e) } } })) } else await expireScope(scope, '控制范围属于旧实例；不能恢复目标。') } return { capabilities: d.capabilities, scopes: c.scopes.map(id => view(scopes.get(id))), activeScopeId: c.activeScopeId } },
     async selectControlScope(s, scopeId) { registered(s, scopeId); context(s).activeScopeId = scopeId; return api.controlContext(s) },
     async submitControl(s, request) { fields(request, ['scopeId', 'command']); command(request.command); return ordinary(s, request.scopeId, request.command.action, 'controls', () => ({ command: request.command })) },
     async recordControl(s, request) { fields(request, ['scopeId', 'action']); if (!['start', 'stop'].includes(request.action)) fail('bad_request', '未知记录动作。'); return ordinary(s, request.scopeId, `recording_${request.action}`, `recording/${request.action}`, () => ({})) },
@@ -309,7 +334,7 @@ export function createP4Service({ mode, session, attach, http, currentInstance =
     async revokeControlScope(s, scopeId) {
       const scope = await scopeReady(s, scopeId, 'control', true)
       if (scope.flight) fail('busy', '当前授权/普通操作仍在处理；Stop 独立可用。')
-      scope.flight = true; scope.controlReady = false
+      scope.flight = true; scope.controlReady = false; scope.permissionReadRevision = (scope.permissionReadRevision ?? 0) + 1
       const notes = []; let revoked = 0
       try {
         for (const m of scope.members) {
@@ -340,7 +365,7 @@ export function createP4Service({ mode, session, attach, http, currentInstance =
           scope.controlGranted = false; scope.stopAvailable = false; scope.stopReason = '此范围 control 授权已撤销；Stop 需要重新明确人工授权原范围。'
         }
         return view(scope)
-      } finally { scope.flight = false }
+      } finally { scope.flight = false; scope.permissionReadRevision = (scope.permissionReadRevision ?? 0) + 1 }
     },
     async releaseControlScope(s, scopeId) {
       const scope = await scopeReady(s, scopeId, 'control', true)
