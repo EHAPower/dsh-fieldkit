@@ -3,5 +3,6 @@ node_modules/
 .env*
 .credentials.yaml
 .dsh/
+lib/
 coverage/
 .DS_Store
