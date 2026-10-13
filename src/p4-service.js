@@ -342,7 +342,7 @@ export function createP4Service({ mode, session, attach, http, currentInstance =
     async startControlTrial(s, request) {
       fields(request, ['scopeId', 'parameters']); const input = trialInput(request.parameters)
       const scope = registered(s, request.scopeId), trialId = randomUUID()
-      const record = { id: trialId, sessionId: s, scopeId: scope.id, mode: request.parameters.mode, memberIds: [], latest: null }
+      const record = { id: trialId, sessionId: s, scopeId: scope.id, mode: request.parameters.mode, memberIds: [], latest: null, previousTrial: scope.trial }
       const run = await ordinary(s, scope.id, 'trial_start', 'trials', () => ({ trial: input }))
       record.memberIds = run.results.map(r => r.operationId); record.latest = run; pinTrialUnknown(record, run); trials.set(trialId, record)
       return trialView(scope, record)
@@ -362,6 +362,7 @@ export function createP4Service({ mode, session, attach, http, currentInstance =
       if (scope.latest?.results.every((r, i) => r.operationId === record.latest?.results[i]?.operationId)) record.latest = scope.latest
       pinTrialUnknown(record, record.latest)
       await refreshTrialUnknown(scope, record, statuses)
+      if (initialTrialNotSubmitted(scope, record)) return trialView(scope, record)
       for (let i = 0; i < scope.members.length; i++) {
         const id = record.memberIds[i]
         if (!id) { statuses.push('not_admitted'); continue }
@@ -398,14 +399,26 @@ export function createP4Service({ mode, session, attach, http, currentInstance =
     if (value.unknown) record.pinnedUnknown = value
     else { record.pinnedUnknown = null; record.latest = value }
   }
+  function initialTrialNotSubmitted(scope, record) {
+    const run = record.latest
+    return !record.pinnedUnknown && !record.evidence?.some(Boolean) && run?.action === 'trial_start' && run.unknown === false && run.results.length === scope.members.length && run.results.every((r, i) => r.operationId === record.memberIds[i] && Object.entries(target(scope.instanceId, scope.members[i].binding)).every(([key, value]) => r.target[key] === value) && r.admission === 'finished' && r.submission === 'not_submitted' && r.controlEffect === 'not_attempted' && r.unknown === false && !r.previousUnknown)
+  }
   function completedReference(scope, record) {
     // Stop polling only a human-released reference with positive complete SDK evidence for every original member.
     return !record.pinnedUnknown && record.released === true && record.statusRead === 'available' && record.states?.length === scope.members.length && record.states.every(state => state === 'completed') && record.latest?.unknown === false && record.latest.results.length === scope.members.length && record.latest.results.every(result => !result.unknown && !result.previousUnknown && result.submission !== 'unknown' && result.controlEffect !== 'unresolved')
   }
   function trialView(scope, record, statuses = record.statuses ?? [], recordingIds = record.recordingIds ?? []) {
     const run = record.pinnedUnknown ?? record.latest ?? scope.latest
-    const value = { statusRead: record.statusRead ?? 'not_read', statusReason: record.statusRead === 'unavailable' ? '最近试验状态读取未完成；显示最后已知状态，原错误见进度。' : null, trialId: record.id, action: run.action, members: scope.members.map(m => target(scope.instanceId, m.binding)), mode: record.mode, referenceReleased: record.released === true, state: record.states?.length ? [...new Set(record.states)].join(' / ') : run.results.map(r => r.admission).join(' / '), progress: statuses.length ? statuses : run.results.map(r => r.phase ?? r.admission), results: run.results.map((r, i) => ({ ...record.evidence?.[i], target: r.target, preparation: r.phase ?? r.admission, admission: r.admission, submission: r.submission, observation: r.observation, unknown: r.unknown, nativeJsonText: r.nativeJsonText, operationId: r.operationId, unknownSource: r.unknownSource, controlEffect: r.controlEffect })), unknown: run.unknown, stopAvailable: scope.stopAvailable, recordingIds, ...(typeof run.newSubmission === 'boolean' ? { newSubmission: run.newSubmission } : {}), ...(run.coalescedExisting ? { coalescedExisting: true } : {}) }
-    scope.trial = value; return structuredClone(value)
+    const rejectedStart = initialTrialNotSubmitted(scope, record)
+    const rejectionReason = '原启动操作已明确未提交；没有本次已启动试验可查询。' + (run.results.some(r => ['recording', 'recording_failed'].includes(r.error?.code)) ? '请核对服务记录目录的可用空间与写权限，并保留原错误。' : '请核对原错误和本次参数。') + `未自动重试；${scope.stopAvailable ? '固定原设备范围 Stop 仍独立可用。' : scope.stopReason ?? '原设备范围 Stop 当前不可用，请核对原范围。'}`
+    if (rejectedStart) statuses = run.results.map(r => `${r.target.targetId} · ${r.phase ?? r.admission}${r.error ? ` · ${r.error.code}: ${r.error.message}` : ''}`)
+    const value = { statusRead: rejectedStart ? 'not_read' : record.statusRead ?? 'not_read', statusReason: rejectedStart ? rejectionReason : record.statusRead === 'unavailable' ? '最近试验状态读取未完成；显示最后已知状态，原错误见进度。' : null, trialId: record.id, action: run.action, members: scope.members.map(m => target(scope.instanceId, m.binding)), mode: record.mode, referenceReleased: record.released === true, state: rejectedStart ? 'not_submitted' : record.states?.length ? [...new Set(record.states)].join(' / ') : run.results.map(r => r.admission).join(' / '), progress: statuses.length ? statuses : run.results.map(r => r.phase ?? r.admission), results: run.results.map((r, i) => ({ ...record.evidence?.[i], target: r.target, preparation: r.phase ?? r.admission, admission: r.admission, submission: r.submission, observation: r.observation, unknown: r.unknown, nativeJsonText: r.nativeJsonText, operationId: r.operationId, unknownSource: r.unknownSource, controlEffect: r.controlEffect })), unknown: run.unknown, stopAvailable: !rejectedStart && scope.stopAvailable, recordingIds, ...(typeof run.newSubmission === 'boolean' ? { newSubmission: run.newSubmission } : {}), ...(run.coalescedExisting ? { coalescedExisting: true } : {}) }
+    if (!record.published || scope.trial?.trialId === record.id) {
+      const previous = record.previousTrial
+      scope.trial = rejectedStart && previous && (previous.unknown || ['unavailable', 'historical'].includes(previous.statusRead) || !['idle', 'completed', 'failed', 'not_submitted'].includes(previous.state)) ? previous : value
+    }
+    record.published = true
+    return structuredClone(value)
   }
   return api
 }

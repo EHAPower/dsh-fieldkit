@@ -103,7 +103,7 @@ test('only exact operation proof clears a transport-unknown trial without resubm
   let starts = 0
   const ui = mount(fixture({ onStart: async () => { starts++; return receipt() } })); fill(ui)
   showResult(ui, [transportUnknown()]); assert.equal(ui.button('预检并启动试验').props.disabled, true)
-  showResult(ui, [notSubmitted()], { state: 'finished' }); change(ui, '确认试验成员与原文参数', true)
+  showResult(ui, [notSubmitted()], { state: 'not_submitted' }); change(ui, '确认试验成员与原文参数', true)
   assert.equal(ui.button('预检并启动试验').props.disabled, false); assert.equal(starts, 0)
 })
 test('other operations, target identities and incomplete evidence cannot clear transport unknown', () => {
@@ -137,7 +137,7 @@ test('all original group members need finished non-submission proof and stale st
   showResult(ui, [transportUnknown(), transportUnknown(second, 'op-2')]); await staleStart(); assert.equal(starts, 0)
   showResult(ui, [notSubmitted()], { members: [first, second], state: 'finished / finished' }); change(ui, '确认试验成员与原文参数', true)
   assert.equal(ui.button('预检并启动试验').props.disabled, true)
-  showResult(ui, [notSubmitted(), notSubmitted(second, 'op-2')], { state: 'finished / finished' }); change(ui, '确认试验成员与原文参数', true)
+  showResult(ui, [notSubmitted(), notSubmitted(second, 'op-2')], { state: 'not_submitted' }); change(ui, '确认试验成员与原文参数', true)
   assert.equal(ui.button('预检并启动试验').props.disabled, false); assert.equal(starts, 0)
 })
 test('Trials strict TypeScript props and DOM handlers compile', () => {
@@ -193,4 +193,47 @@ test('reference release keeps SDK completed terminal usable but cannot bypass ac
   assert.equal(ui.button('预检并启动试验').props.disabled, true)
   ui.props.receipt = receipt([first], { referenceReleased: true, state: 'completed', statusRead: 'available', unknown: true }); ui.render(); fill(ui)
   assert.equal(ui.button('预检并启动试验').props.disabled, true)
+})
+
+test('known unsubmitted startup displays the original failure without a nonexistent trial Stop or unavailable-status gate', () => {
+  const failed = receipt([first], { state: 'not_submitted', statusRead: 'not_read', statusReason: '原启动操作明确未提交；核对记录目录的可用空间与写权限。', progress: ['recording: Bad file descriptor (os error 9)'], stopAvailable: false, results: [{ target: first, operationId: 'original', preparation: 'recording', admission: 'finished', submission: 'not_submitted', controlEffect: 'not_attempted', unknown: false }] })
+  const ui = mount(fixture({ receipt: failed }))
+  const text = ui.nodes().flatMap(node => node.children.filter(child => typeof child === 'string')).join(' ')
+  assert.match(text, /启动未提交/); assert.match(text, /Bad file descriptor/)
+  assert.equal(ui.button('显式停止原试验'), undefined)
+  assert.doesNotMatch(text, /最近试验状态读取未完成|当前状态未核对/)
+  fill(ui); assert.equal(ui.button('预检并启动试验').props.disabled, false)
+  ui.props.stopGateReason = '原范围授权已撤销'; ui.render()
+  assert.ok(ui.nodes().some(node => node.children.includes('原范围授权已撤销')))
+})
+
+test('known target-update refusal cannot authorize another start while the original trial remains active', () => {
+  const ui = mount(fixture({ receipt: receipt([first], { state: 'active', statusRead: 'available', results: [notSubmitted()], unknown: false }) }))
+  fill(ui)
+  assert.equal(ui.button('预检并启动试验').props.disabled, true)
+  assert.equal(ui.button('显式停止原试验').props.disabled, false)
+})
+
+test('same original startup proof retires only the queued history Stop including its stale callback', async () => {
+  let stops = 0
+  const queued = receipt([first], { state: 'queued', statusRead: 'not_read', results: [{ ...notSubmitted(), admission: 'queued', submission: 'not_attempted', nativeJsonText: 'ORIGINAL_QUEUED' }] })
+  const ui = mount(fixture({ onStart: async () => queued, onTrialStop: async () => { stops++; return receipt() } }))
+  fill(ui); await ui.button('预检并启动试验').props.onClick(); ui.render()
+  const oldStop = ui.button('显式停止原试验').props.onClick
+  ui.props.receipt = receipt([first], { state: 'not_submitted', statusRead: 'not_read', stopAvailable: false, results: [notSubmitted()] }); ui.render()
+  assert.equal(ui.button('显式停止原试验'), undefined)
+  assert.match(ui.visible(), /ORIGINAL_QUEUED/); assert.match(ui.visible(), /queued/)
+  await oldStop(); assert.equal(stops, 0)
+  ui.props.receipt = receipt([second], { trialId: 'new-trial' }); ui.render()
+  assert.equal(ui.nodes().filter(node => node.type === 'button' && node.children.includes('显式停止原试验')).length, 1, 'only the new actual trial keeps Stop')
+})
+
+test('different IDs scopes operations or actual active and unknown histories retain their original trial Stop', async () => {
+  for (const variant of ['trial', 'member', 'operation', 'active', 'unknown', 'target']) {
+    const original = receipt([first], { state: variant === 'active' ? 'active' : 'queued', statusRead: 'not_read', unknown: variant === 'unknown', results: [{ ...notSubmitted(), admission: 'queued', submission: variant === 'unknown' ? 'unknown' : variant === 'active' ? 'locally_submitted' : 'not_attempted', controlEffect: variant === 'unknown' ? 'unresolved' : 'not_attempted', unknown: variant === 'unknown', unknownSource: variant === 'unknown' ? 'sdk' : null }] })
+    const ui = mount(fixture({ onStart: async () => original })); fill(ui); await ui.button('预检并启动试验').props.onClick(); ui.render()
+    const target = variant === 'member' ? { ...first, runNonce: 'different' } : first
+    ui.props.receipt = receipt([target], { trialId: variant === 'trial' ? 'other-trial' : original.trialId, state: variant === 'target' ? 'active' : 'not_submitted', statusRead: 'available', results: [notSubmitted(target, variant === 'operation' ? 'other-op' : 'op-1')] }); ui.render()
+    assert.equal(ui.button('显式停止原试验').props.disabled, false, variant)
+  }
 })

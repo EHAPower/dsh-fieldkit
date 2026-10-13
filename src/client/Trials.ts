@@ -57,6 +57,9 @@ const memberUnknown = (v: TrialMemberResult) => v.unknown || v.submission === 'u
 const unknown = (r: TrialReceipt) => r.unknown || r.results.some(memberUnknown)
 const notSubmitted = (v: TrialMemberResult) => v.admission === 'finished' && v.submission === 'not_submitted' && v.controlEffect === 'not_attempted' && v.unknown === false
 const allNotSubmitted = (r: TrialReceipt) => !unknown(r) && r.members.length > 0 && r.results.length === r.members.length && r.members.every(t => r.results.filter(v => key(v.target) === key(t) && notSubmitted(v)).length === 1)
+const startupNotSubmitted = (r: TrialReceipt) => r.state === 'not_submitted' && allNotSubmitted(r)
+const startupKey = (r: TrialReceipt) => JSON.stringify([r.trialId, scopeKey(r.members)])
+const queuedStartupProvedUnsubmitted = (r: TrialReceipt, proof?: TrialReceipt) => !!proof && !!r.trialId && !unknown(r) && r.state.split(' / ').every(state => ['queued', 'preparing'].includes(state)) && r.results.length === r.members.length && r.members.every(t => r.results.filter(v => key(v.target) === key(t)).length === 1) && r.results.every(v => v.admission === 'queued' && v.submission === 'not_attempted' && v.controlEffect === 'not_attempted' && !!v.operationId && proof.results.some(p => key(p.target) === key(v.target) && p.operationId === v.operationId))
 function checkReceipt(r: TrialReceipt, members: readonly TrialTarget[], trialId?: string) {
   if (scopeKey(r.members) !== scopeKey(members) || (trialId !== undefined && r.trialId !== trialId) || r.results.some(v => !members.some(t => key(t) === key(v.target)))) throw new Error('试验结果与原始成员或试验编号不匹配。')
 }
@@ -68,6 +71,7 @@ export function Trials(props: TrialsProps) {
   const [history, setHistory] = useState<{ action: string; receipt: TrialReceipt }[]>([])
   const [latest, setLatest] = useState<{ order: number; receipt: TrialReceipt } | null>(null)
   const flight = useRef(false), stopFlights = useRef(new Set<string>()), unknownRecords = useRef(new Map<string, TrialMemberResult>()), order = useRef(0)
+  const unsubmittedStarts = useRef(new Map<string, TrialReceipt>())
   const liveContext = useRef(''), confirmed = useRef(''), stopGate = useRef(props.stopGateReason)
   stopGate.current = props.stopGateReason
   const trackUnknown = (r: TrialReceipt) => {
@@ -92,12 +96,14 @@ export function Trials(props: TrialsProps) {
   if (liveContext.current !== context) { liveContext.current = context; confirmed.current = '' }
   const receipt = props.receipt ?? latest?.receipt ?? null
   if (receipt) trackUnknown(receipt)
+  if (receipt?.trialId && startupNotSubmitted(receipt)) unsubmittedStarts.current.set(startupKey(receipt), receipt)
+  const noTrialStop = (r: TrialReceipt) => startupNotSubmitted(r) || queuedStartupProvedUnsubmitted(r, unsubmittedStarts.current.get(startupKey(r)))
   const busy = props.busy === true || pending
   const styles = panelStyles(busy)
   const matchingReservation = !!props.reservation?.reservationId && scopeKey(props.reservation.members) === memberScope
   const paramsPresent = commandFields[parameters.mode].every(k => parameters.command[k].trim()) && Object.values(parameters.envelope).every(v => v.trim()) && parameters.durationS.trim() && (!parameters.reach || parameters.reach.toleranceMm.trim() && parameters.reach.settleMs.trim())
   const statusGate = props.historyReason ?? (receipt?.statusRead === 'unavailable' || receipt?.statusRead === 'historical' ? receipt.statusReason ?? '当前试验状态尚未核对；请刷新原范围状态。' : null)
-  const reason = props.gateReason || statusGate || (!members.length || members.length !== selected.length || !members.every(complete) || new Set(members.map(t => t.uid)).size !== members.length ? '请明确选择完整且不重复的原始成员。' : !matchingReservation ? '须由服务为这些精确成员提供控制占用。' : blocked(members) ? '成员存在未知效果，不能重试或提交新目标。' : receipt && !allNotSubmitted(receipt) && !['idle', 'completed', 'failed', 'released'].includes(receipt.state) && receipt.members.some(t => members.some(m => m.uid === t.uid)) ? '原成员已有活动或未决试验；请先核对原记录。' : !paramsPresent ? '请填写本次目标、限值与时长原文；数值有效性由 SDK 校验。' : null)
+  const reason = props.gateReason || statusGate || (!members.length || members.length !== selected.length || !members.every(complete) || new Set(members.map(t => t.uid)).size !== members.length ? '请明确选择完整且不重复的原始成员。' : !matchingReservation ? '须由服务为这些精确成员提供控制占用。' : blocked(members) ? '成员存在未知效果，不能重试或提交新目标。' : receipt && !startupNotSubmitted(receipt) && !['idle', 'completed', 'failed', 'released'].includes(receipt.state) && receipt.members.some(t => members.some(m => m.uid === t.uid)) ? '原成员已有活动或未决试验；请先核对原记录。' : !paramsPresent ? '请填写本次目标、限值与时长原文；数值有效性由 SDK 校验。' : null)
   const canStart = !busy && !reason && confirmation === context && confirmed.current === context
   const originalCurrent = receipt && receipt.members.every(t => props.candidates.some(c => key(c) === key(t))) && scopeKey(receipt.members) === memberScope
   const canUpdate = !!receipt?.trialId && receipt.mode === 'position' && receipt.state === 'active' && !unknown(receipt) && !blocked(receipt.members) && originalCurrent && matchingReservation && !props.gateReason && !statusGate && !busy && !!position.trim()
@@ -134,7 +140,7 @@ export function Trials(props: TrialsProps) {
   }
   const stop = async (original: TrialReceipt) => {
     const stopKey = scopeKey(original.members)
-    if (!original.stopAvailable || stopGate.current || stopFlights.current.has(stopKey)) return
+    if (noTrialStop(original) || !original.stopAvailable || stopGate.current || stopFlights.current.has(stopKey)) return
     stopFlights.current.add(stopKey); setStopping([...stopFlights.current])
     const fixed = copy(original.members), sequence = ++order.current
     try {
@@ -172,7 +178,7 @@ export function Trials(props: TrialsProps) {
     receipt && React.createElement('button', { disabled: busy || !receipt.trialId, onClick: release }, '释放原试验引用（不 Stop）'),
     notice && React.createElement('p', { role: 'status' }, notice),
     React.createElement('h3', null, '原始试验与逐台证据'),
-    [...history, ...(receipt && !history.some(h => h.receipt === receipt) ? [{ action: props.historyReason || receipt.statusRead === 'historical' ? '历史试验' : receipt.referenceReleased && receipt.state === 'completed' && receipt.statusRead === 'available' && !unknown(receipt) ? '已完成试验记录（引用已释放）' : receipt.statusRead === 'available' ? '服务最近读取的试验' : receipt.statusRead === 'unavailable' ? '试验状态读取未完成' : '试验操作回执（当前状态未核对）', receipt }] : [])].map(({ action, receipt: r }, i) => React.createElement('div', { key: i, style: styles.card },
+    [...history, ...(receipt && !history.some(h => h.receipt === receipt) ? [{ action: props.historyReason || receipt.statusRead === 'historical' ? '历史试验' : startupNotSubmitted(receipt) ? '试验启动未提交' : receipt.referenceReleased && receipt.state === 'completed' && receipt.statusRead === 'available' && !unknown(receipt) ? '已完成试验记录（引用已释放）' : receipt.statusRead === 'available' ? '服务最近读取的试验' : receipt.statusRead === 'unavailable' ? '试验状态读取未完成' : '试验操作回执（当前状态未核对）', receipt }] : [])].map(({ action, receipt: r }, i) => React.createElement('div', { key: i, style: styles.card },
       React.createElement('p', null, `${action}${r === receipt ? '' : '（原动作回执，非当前试验状态）'} · 试验 ${text(r.trialId)} · ${props.historyReason || r.statusRead === 'historical' || r.statusRead === 'unavailable' ? '最后已知状态 ' : '已登记状态 '}${r.state} · 成员 ${r.members.map(t => `${t.targetId}/${t.uid}/${t.runNonce}/${t.connectionGeneration}`).join('、')}`),
       r.referenceReleased && React.createElement('p', null, '原试验引用已释放；不代表试验结束或设备停止，状态仍以 SDK 读取事实为准。'),
       (props.historyReason || r.statusReason) && React.createElement('p', { role: 'status' }, props.historyReason ?? r.statusReason),
@@ -182,6 +188,7 @@ export function Trials(props: TrialsProps) {
       r.coalescedExisting && React.createElement('p', null, '沿用已有停止请求；没有再次提交。'),
       r.newSubmission === false && React.createElement('p', null, '本次响应未新增提交（查询或沿用记录也会如此）；原操作的本地提交事实见逐台记录。'),
       React.createElement('p', null, `关联记录：${r.recordingIds.join('、') || '服务尚未提供记录编号'}`),
-      (props.stopGateReason || !r.stopAvailable) && React.createElement('p', { role: 'status' }, props.stopGateReason ?? '服务未允许此原试验范围请求 Stop。'),
-      React.createElement('button', { disabled: !!props.stopGateReason || !r.stopAvailable || stopping.includes(scopeKey(r.members)), onClick: () => stop(r) }, r.trialId ? '显式停止原试验' : '按原设备范围请求停止（试验结果未知）'))))
+      noTrialStop(r) && React.createElement('p', null, '本次启动未提交；如需停止原设备，请核对独立固定范围 Stop 入口。'),
+      (props.stopGateReason || !noTrialStop(r) && !r.stopAvailable) && React.createElement('p', { role: 'status' }, props.stopGateReason ?? '服务未允许此原试验范围请求 Stop。'),
+      !noTrialStop(r) && React.createElement('button', { disabled: !!props.stopGateReason || !r.stopAvailable || stopping.includes(scopeKey(r.members)), onClick: () => stop(r) }, r.trialId ? '显式停止原试验' : '按原设备范围请求停止（试验结果未知）'))))
 }

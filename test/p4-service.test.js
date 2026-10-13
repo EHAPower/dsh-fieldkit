@@ -432,3 +432,67 @@ test('late single or group reservation success cannot reopen ordinary control af
     assert.equal(x.calls.filter(call => call[0] === 'stop').length, grouped ? 2 : 1)
   }
 })
+
+test('known initial trial rejection preserves the original audit failure without polling a nonexistent trial', async () => {
+  const x = setup(), fixed = await x.scope(); let trialReads = 0
+  const parameters = { mode: 'position', command: { positionMm: '1', velocityMmS: '', forceN: '', equilibriumMm: '', stiffnessNPerMm: '', dampingNsPerMm: '' }, envelope: { positionMinMm: '0', positionMaxMm: '10', velocityAbsMaxMmS: '1', forceAbsMaxN: '1', stiffnessMaxNPerMm: '1', dampingMaxNsPerMm: '1', durationMaxS: '1' }, durationS: '1', reach: null }
+  x.client.startTrial = async (b, intent) => ({ ...x.receipt(b, intent, 'trial_start'), admission: 'queued', submission: 'not_attempted', controlEffect: 'not_attempted' })
+  x.client.controlOperation = async (_i, id) => ({ ...x.receipt(x.bindings[0], { claimantId: 'chat', operationId: id }, 'trial_start'), submission: 'not_submitted', controlEffect: 'not_attempted', error: { code: 'recording', message: 'Bad file descriptor (os error 9)' }, nativeJsonText: 'ORIGINAL_RECORDING_FAILURE' })
+  x.client.trialStatus = async () => { trialReads++; throw error('trial_stale') }
+  const start = await x.service.startControlTrial('chat', { scopeId: fixed.scopeId, parameters })
+  const rejected = await x.service.getControlTrial('chat', start.trialId)
+  assert.equal(trialReads, 0)
+  assert.equal(rejected.state, 'not_submitted'); assert.equal(rejected.statusRead, 'not_read'); assert.equal(rejected.unknown, false); assert.equal(rejected.stopAvailable, false)
+  assert.match(rejected.progress.join(' '), /recording.*Bad file descriptor/)
+  assert.match(rejected.statusReason, /可用空间与写权限/)
+  assert.equal(rejected.results[0].operationId, 'op1'); assert.equal(rejected.results[0].nativeJsonText, 'ORIGINAL_RECORDING_FAILURE')
+  const current = (await x.service.controlContext('chat')).scopes[0]
+  assert.equal(current.stopAvailable, true); assert.equal(current.trial.state, 'not_submitted'); assert.equal(trialReads, 0)
+  await x.service.revokeControlScope('chat', fixed.scopeId)
+  const revoked = await x.service.getControlTrial('chat', start.trialId)
+  assert.match(revoked.statusReason, /授权已撤销/); assert.doesNotMatch(revoked.statusReason, /Stop 仍独立可用/)
+  assert.equal(x.calls.some(call => ['stop', 'original'].includes(call[0])), false)
+})
+
+test('known startup refusal never replaces a prior active or SDK-unknown trial and target refusal still reads the original trial', async () => {
+  const parameters = { mode: 'position', command: { positionMm: '1', velocityMmS: '', forceN: '', equilibriumMm: '', stiffnessNPerMm: '', dampingNsPerMm: '' }, envelope: { positionMinMm: '0', positionMaxMm: '10', velocityAbsMaxMmS: '1', forceAbsMaxN: '1', stiffnessMaxNPerMm: '1', dampingMaxNsPerMm: '1', durationMaxS: '1' }, durationS: '1', reach: null }
+  for (const unknown of [false, true]) {
+    const x = setup(), fixed = await x.scope(); let starts = 0, reads = 0
+    x.client.startTrial = async (b, intent) => { starts++; return { ...x.receipt(b, intent, 'trial_start'), ...(unknown ? { submission: 'unknown', controlEffect: 'unresolved' } : {}) } }
+    x.client.trialStatus = async (_b, id) => { reads++; assert.equal(id, 'op1'); return { trial: { state: 'active', stopObserved: false, stopConfirmationOverdue: false, elapsedMs: '20', nativeJsonText: 'ORIGINAL_ACTIVE' } } }
+    x.client.recordingStatus = async () => ({ recordingId: null })
+    const first = await x.service.startControlTrial('chat', { scopeId: fixed.scopeId, parameters }); await x.service.getControlTrial('chat', first.trialId)
+    x.client.startTrial = async (b, intent) => { starts++; return { ...x.receipt(b, intent, 'trial_start'), submission: 'not_submitted', controlEffect: 'not_attempted', error: { code: 'busy', message: 'prior trial still active' } } }
+    const refused = await x.service.startControlTrial('chat', { scopeId: fixed.scopeId, parameters })
+    assert.equal(refused.state, 'not_submitted')
+    const retained = (await x.service.controlContext('chat')).scopes[0].trial
+    assert.equal(retained.trialId, first.trialId); assert.equal(retained.state, 'active'); assert.equal(retained.unknown, unknown)
+    await x.service.getControlTrial('chat', refused.trialId)
+    assert.equal((await x.service.controlContext('chat')).scopes[0].trial.trialId, first.trialId)
+    if (!unknown) {
+      x.client.updateTrial = async (b, intent) => ({ ...x.receipt(b, intent, 'trial_target'), submission: 'not_submitted', controlEffect: 'not_attempted', error: { code: 'recording', message: 'Bad file descriptor' } })
+      await x.service.updateControlTrial('chat', { trialId: first.trialId, positionRaw: '2' })
+      const before = reads, update = await x.service.getControlTrial('chat', first.trialId)
+      assert.equal(reads, before + 1); assert.equal(update.state, 'active'); assert.equal(update.stopAvailable, true)
+      assert.equal(update.action, 'trial_target'); assert.equal(update.results[0].admission, 'finished')
+      assert.equal(update.results[0].submission, 'not_submitted'); assert.equal(update.results[0].controlEffect, 'not_attempted'); assert.equal(update.unknown, false)
+    }
+    assert.equal(starts, unknown ? 1 : 2)
+  }
+})
+
+test('a partially refused group trial still reads every original member and retains the active-member Stop gate', async () => {
+  const x = setup()
+  x.client.createControlGroup = async (_i, bindings) => ({ groupId: 'g', reservationId: 'r', stopRequestId: 'group-stop', members: bindings.map(b => ({ bindingId: b.binding_id, controlEpoch: '1', stopRequestId: `stop-${b.binding_id}` })) })
+  x.client.groupTickets = async () => ({ requests: x.bindings.map((b, i) => ({ bindingId: b.binding_id, operationId: `trial-${i}`, controlEpoch: '1' })) })
+  x.client.groupSubmit = async () => ({ members: x.bindings.map((b, i) => ({ bindingId: b.binding_id, operation: { ...x.receipt(b, { operationId: `trial-${i}`, claimantId: 'chat' }, 'trial_start'), ...(i === 0 ? { submission: 'not_submitted', controlEffect: 'not_attempted', error: { code: 'recording', message: 'Bad file descriptor' } } : {}) }, error: null })) })
+  const readIds = []
+  x.client.trialStatus = async (_b, id) => { readIds.push(id); if (id === 'trial-0') throw error('trial_stale'); return { trial: { state: 'active', stopObserved: false, stopConfirmationOverdue: false, elapsedMs: '2', nativeJsonText: 'ACTIVE_SECOND_MEMBER' } } }
+  x.client.recordingStatus = async () => ({ recordingId: null })
+  const { candidates } = await x.service.controlCandidates('chat'), fixed = await x.service.createControlScope('chat', { candidateIds: candidates.map(c => c.candidateId) })
+  const parameters = { mode: 'position', command: { positionMm: '1', velocityMmS: '', forceN: '', equilibriumMm: '', stiffnessNPerMm: '', dampingNsPerMm: '' }, envelope: { positionMinMm: '0', positionMaxMm: '10', velocityAbsMaxMmS: '1', forceAbsMaxN: '1', stiffnessMaxNPerMm: '1', dampingMaxNsPerMm: '1', durationMaxS: '1' }, durationS: '1', reach: null }
+  const start = await x.service.startControlTrial('chat', { scopeId: fixed.scopeId, parameters }), observed = await x.service.getControlTrial('chat', start.trialId)
+  assert.deepEqual(readIds, ['trial-0', 'trial-1']); assert.notEqual(observed.state, 'not_submitted')
+  assert.equal(observed.stopAvailable, true); assert.equal(observed.statusRead, 'unavailable')
+  assert.equal(observed.results[1].trialState, 'active'); assert.equal(observed.results[1].trialNativeJsonText, 'ACTIVE_SECOND_MEMBER')
+})
