@@ -22,12 +22,16 @@ function project(snapshot) {
     return clipped
   }
   const effect = value => value ? { state: text(value.state, 64), reason_code: text(value.reason_code) } : null
+  const observationSource = value => value ? {
+    phase: text(value.phase, 16), instanceId: text(value.instanceId), bindingId: text(value.bindingId),
+    sdkBindingId: text(value.sdkBindingId), targetId: text(value.targetId),
+  } : null
   const warnings = snapshot.observationWarnings ?? []
   const result = {
     bindingId: text(snapshot.bindingId), targetId: text(snapshot.targetId), transport: text(snapshot.transport, 32),
     instanceId: text(snapshot.instanceId), identity: snapshot.identity ? { uid: text(snapshot.identity.uid, 64), runNonce: text(snapshot.identity.runNonce, 64) } : null,
     connectionGeneration: text(snapshot.connectionGeneration, 64), expired: snapshot.expired,
-    observationWarnings: warnings.slice(0, 4).map(warning => ({ code: text(warning.code, 128), message: text(warning.message, 384), action: text(warning.action, 64), ...(typeof warning.unknown === 'boolean' ? { unknown: warning.unknown } : {}), ...(warning.controlEffect ? { controlEffect: effect(warning.controlEffect) } : {}) })),
+    observationWarnings: warnings.slice(0, 4).map(warning => ({ code: text(warning.code, 128), message: text(warning.message, 384), action: text(warning.action, 64), ...(typeof warning.unknown === 'boolean' ? { unknown: warning.unknown } : {}), ...(warning.controlEffect ? { controlEffect: effect(warning.controlEffect) } : {}), ...(warning.observationSource ? { observationSource: observationSource(warning.observationSource) } : {}) })),
     observationWarningsOmittedCount: Math.max(0, warnings.length - 4), observationWarningsContainUnknown: warnings.some(warning => warning.unknown === true),
     ...(snapshot.controlEffect ? { controlEffect: effect(snapshot.controlEffect) } : {}),
     ...(snapshot.readPermit ? { readPermit: { ready: snapshot.readPermit.ready, reason_code: text(snapshot.readPermit.reason_code) } } : {}),

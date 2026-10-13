@@ -61,6 +61,13 @@ test('bounded snapshot evidence preserves unknown gate facts and excludes creden
   assert.equal(value.readRun.evidenceOmitted, true)
 })
 
+test('cached observation warnings retain their limited originating observation source', async () => {
+  const observationSource = { phase: 'cleanup', instanceId: 'old-instance', bindingId: 'old-observation', sdkBindingId: 'old-sdk-binding', targetId: 'usb:old' }
+  const { tool } = fixture({ getSnapshot: async () => ({ ...snapshot, observationWarnings: [{ code: 'unauthorized', message: 'old cleanup rejected', action: null, unknown: true, observationSource }] }) })
+  const value = await tool.execute({}, exec)
+  assert.deepEqual(value.observationWarnings[0].observationSource, observationSource)
+})
+
 test('real service cache journey calls only snapshot after explicit human selection, with no read/bind/CLI fallback', async () => {
   const calls = [], ownerIdentity = { uid: identity.uid, run_nonce: identity.runNonce }, ownerTarget = { target_id: 'can:1', transport: 'can', connected: true, identity: ownerIdentity, connection_generation: binding.connectionGeneration, can_attach: true, can_connect: false }
   const service = createFieldkitService({ deviceMode: 'integration', integrationUrl: 'http://127.0.0.1:18080', integrationTokenFile: '/tmp/synthetic-token' }, { integration: {
