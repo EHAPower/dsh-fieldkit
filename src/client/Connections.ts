@@ -142,6 +142,7 @@ export function Connections({ remote, sessionId, capabilities, targets, busy, op
         button('清空 CAN 表单', async () => { setCanDraft(blankCan()); return 'CAN 档案表单已清空；尚未创建或更新档案。' }), button('创建 / 更新 CAN 档案', async () => { await finishJob(remote, sessionId, remote.saveProfile(sessionId, canDraft), active); if (active()) await reload() })),
       !supports('advanced_can') ? React.createElement('p', null, '当前服务尚未提供高级 CAN；已有配置 context、classic 与 Python 覆盖待服务支持。') : React.createElement('details', null, React.createElement('summary', null, '高级 CAN：已有配置与多节点'),
         React.createElement('p', null, '使用已有 python-can 命名配置，明确选择 classic 或 FD；扫描可从未连接网络开始，只读取 Identity。'),
+        React.createElement('p', null, '请核对 DSH Host 上的 Python 解释器绝对路径、python-can 依赖，以及已有命名 context 的接口和通道配置。原始失败原因保留在上方；只有已确认是路径、依赖或 context 配置错误，才在修正后人工点击连接或扫描。超时或结果未知时，先查询原任务与连接状态，不重复提交；不会自动重试。'),
         React.createElement('div', { style: grid }, input('python-can 配置 context', advanced.channel, v => setAdvanced({ ...advanced, channel: v })),
           React.createElement('label', null, '高级 CAN 帧格式', React.createElement('select', { value: advanced.mode, disabled: busy || working, onChange: (e: any) => setAdvanced({ ...advanced, mode: e.target.value }) }, React.createElement('option', { value: 'classic' }, 'classic'), React.createElement('option', { value: 'fd' }, 'FD'))),
           input('Python 解释器覆盖（可留空）', advanced.python, v => setAdvanced({ ...advanced, python: v })), input('高级 CAN 单节点 0–127', advancedNode, setAdvancedNode, 'number'), input('高级扫描节点（逗号分隔，最多 16）', nodes, setNodes)),

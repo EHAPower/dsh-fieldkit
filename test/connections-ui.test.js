@@ -234,6 +234,23 @@ test('failed queued CAN connection job preserves failure and never retries or cl
   assert.equal(submits, 1); assert.equal(polls, 1); assert.equal(loads, 1)
 })
 
+test('advanced CAN missing runtime keeps original failure and provides manual path and context recovery guidance', async () => {
+  const original = '无法启动 python-can 配置解析：No such file or directory (os error 2)'
+  let submits = 0
+  const remote = { ...baseRemote(), connectAdvanced: async () => { submits++; return success({ jobId: 'runtime-failed', kind: 'connect', state: 'queued', error: null }) }, getJob: async () => success({ jobId: 'runtime-failed', kind: 'connect', state: 'failed', error: original }) }
+  const ui = await ready(remote, { setTimeout: resolve => queueMicrotask(resolve) })
+  update(ui, 'python-can 配置 context', 'P5_MISSING_RUNTIME')
+  update(ui, 'Python 解释器覆盖（可留空）', '/private/p5/missing-python')
+  await ui.button('连接高级 CAN 单节点').props.onClick(); ui.render()
+  assert.equal(ui.status(), original)
+  assert.match(allText(ui), /DSH Host.*Python 解释器绝对路径/)
+  assert.match(allText(ui), /已有.*context.*接口.*通道/)
+  assert.match(allText(ui), /只有已确认是路径、依赖或 context 配置错误.*修正后人工点击连接或扫描/)
+  assert.match(allText(ui), /超时或结果未知.*查询原任务与连接状态.*不重复提交.*不会自动重试/)
+  assert.equal(submits, 1)
+  assert.equal(ui.button('连接高级 CAN 单节点').props.disabled, false)
+})
+
 test('cache timeout cannot discard accepted USB UID job or erase its failure on later refresh', async () => {
   const profile = { transport: 'usb', id: 'usb', name: 'USB', serial: 'S', expectedUid: null }
   const connection = { connectionId: 'usb:S', targetId: 'usb:S', identity, connectionGeneration: '1', connected: true, snapshotJsonText: '{}', telemetryReceivedAgeMs: null, profileJobId: 'uid-save' }
