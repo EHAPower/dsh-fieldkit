@@ -23,7 +23,20 @@ export interface FieldkitTarget {
   readonly canConnect: boolean
 }
 
-export interface FieldkitError { readonly code: string; readonly message: string; readonly action: string | null; readonly unknown?: boolean; readonly controlEffect?: FieldkitControlEffect }
+export interface FieldkitError {
+  readonly code: string
+  readonly message: string
+  readonly action: string | null
+  readonly unknown?: boolean
+  readonly controlEffect?: FieldkitControlEffect
+  readonly observationSource?: {
+    readonly phase: 'cleanup' | 'renewal'
+    readonly instanceId: string | null
+    readonly bindingId: string
+    readonly sdkBindingId: string | null
+    readonly targetId: string | null
+  }
+}
 
 export interface FieldkitBinding {
   readonly bindingId: string

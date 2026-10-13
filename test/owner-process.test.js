@@ -256,6 +256,7 @@ test('lease renewal failure expires observation without reconnect or further ren
   const f = await leasedService(t, async () => { throw Object.assign(new Error('lease expired'), { code: 'not_found' }) })
   await f.timers[0].tick()
   assert.equal(f.service.selectedBinding('lease-chat').expired, true)
+  assert.deepEqual(f.service.selectedBinding('lease-chat').observationWarnings[0].observationSource, { phase: 'renewal', instanceId: f.record.instance_id, bindingId: f.binding.bindingId, sdkBindingId: 'leased', targetId: 'usb:lease' })
   assert.equal(f.timers.length, 1)
   assert.equal(f.calls.filter(c => c[0] === 'bind').length, 1)
   assert.deepEqual(f.calls.filter(c => c[0] === 'detach'), [['detach', 'leased']])

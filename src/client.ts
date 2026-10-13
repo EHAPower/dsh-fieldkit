@@ -19,6 +19,14 @@ export const name = '@ehapower/dsh-fieldkit'
 export const inject = ['remote', 'slots', 'layout', 'sessions']
 
 const PANEL_ID = 'fieldkit'
+function observationWarningText(warning: any, binding: any) {
+  const source = warning.observationSource
+  if (!source) return `观察引用警告（来源未记录，不能据此判断当前实例认证）：${errorText(warning)}`
+  const current = source.bindingId === binding?.bindingId && source.instanceId === binding?.instanceId
+  const label = source.phase === 'cleanup' ? `${current ? '当前' : '旧'}观察引用清理未确认` : `${current ? '当前' : '旧'}观察续约失败`
+  const scope = `来源实例 ${text(source.instanceId)}；观察 ${text(source.bindingId)}；SDK 绑定 ${text(source.sdkBindingId)}；目标 ${text(source.targetId)}`
+  return `${label}（${scope}）：${errorText(warning)}${source.phase === 'cleanup' ? '。这是原观察的清理结果，与当前读取及认证结果分别显示；新读取成功不证明原引用已释放。' : ''}`
+}
 const PANEL_CSS = `
 [data-fieldkit-panel] { display:grid; grid-template-columns:minmax(0,1fr) minmax(320px,38%); gap:16px; height:100%; min-height:0; overflow:hidden; padding:16px; box-sizing:border-box; color:var(--dsh-fg,inherit); }
 [data-fieldkit-panel] input, [data-fieldkit-panel] textarea, [data-fieldkit-panel] select { max-width:100%; min-width:0; box-sizing:border-box; }
@@ -294,7 +302,7 @@ function FieldkitPanel(props: any) {
       if (!current(ticket, selected.bindingId)) return
       selectBinding(null); setSnapshot(null); setReadRun(null)
       const warnings = result?.observationWarnings ?? []
-      setNotice(warnings.length ? `已解除观察；owner 引用释放警告：${warnings.map(errorText).join('；')}` : '已取消选择并解除观察；没有执行设备写入或运动。')
+      setNotice(warnings.length ? `已取消选择；${warnings.map((warning: any) => observationWarningText(warning, selected)).join('；')}` : '已取消选择并解除观察；没有执行设备写入或运动。')
     } catch (error) { if (current(ticket, selected.bindingId)) setNotice(`解除观察失败：${errorText(error)}`) } finally { end() }
   }
 
@@ -383,7 +391,7 @@ function FieldkitPanel(props: any) {
       React.createElement('div', { style: styles.card }, React.createElement('h2', null, '当前观察'),
         React.createElement('p', null, `UID：${text(identity?.uid)}　run_nonce：${text(identity?.runNonce)}　连接代次：${text(binding?.connectionGeneration ?? snapshot?.connectionGeneration)}`),
         binding?.expired && React.createElement('p', { role: 'alert' }, '绑定已过期；主动读取已停用，请重新选择目标。'),
-        warnings.map((warning: any, index: number) => React.createElement('p', { key: index, role: 'alert' }, `owner 引用警告：${errorText(warning)}`)),
+        warnings.map((warning: any, index: number) => React.createElement('p', { key: index, role: 'alert' }, observationWarningText(warning, binding))),
         snapshot && React.createElement(React.Fragment, null,
           React.createElement('p', null, legacy ? 'Legacy CLI 无持续 owner 读取门。' : `读取门：${snapshot.readiness?.ready ? '可读取' : `阻止 (${text(snapshot.readiness?.reasonCode)})`}`),
           snapshot.controlEffect && React.createElement('p', { role: snapshot.controlEffect.state === 'unknown' ? 'alert' : undefined }, `设备效果：${snapshot.controlEffect.state}（${text(snapshot.controlEffect.reason_code)}）；读取成功不代表设备停止或安全。`),

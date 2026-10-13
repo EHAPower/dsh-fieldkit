@@ -155,6 +155,41 @@ test('failed observation cleanup does not hide a successful new selection and is
   assert.equal(final.observationWarnings.length, 0)
 })
 
+test('old instance observation cleanup warning retains original scope while new snapshot authenticates successfully', async () => {
+  const { service, integration, calls } = setup()
+  const original = await select(service)
+  let failDelete = true
+  integration.detach = async old => {
+    calls.push(['cleanup', old.instance_id, old.binding_id])
+    if (old.instance_id === 'instance-a' && failDelete) throw Object.assign(new Error('old cleanup unauthorized'), { code: 'unauthorized', unknown: true })
+  }
+  integration.targets = async () => ({ instance_id: 'instance-b', discovery_limited: false, discovery_reason: null, targets: [target, { ...target, target_id: 'usb:USB-0002' }] })
+  integration.bind = async request => ({ ...binding, instance_id: request.instance_id, target_id: request.target_id, binding_id: 'new-owner-binding' })
+  const next = await select(service, 'chat-a', 'usb:USB-0002')
+  assert.equal(next.instanceId, 'instance-b')
+  assert.deepEqual(next.observationWarnings, [{ code: 'unauthorized', message: 'old cleanup unauthorized', action: null, unknown: true, observationSource: { phase: 'cleanup', instanceId: 'instance-a', bindingId: original.bindingId, sdkBindingId: 'owner-binding-1', targetId: target.target_id } }])
+  const snapshot = await service.getSnapshot('chat-a', { bindingId: next.bindingId })
+  assert.equal(snapshot.instanceId, 'instance-b')
+  assert.equal(snapshot.readiness.ready, true)
+  assert.equal(snapshot.observationWarnings[0].observationSource.instanceId, 'instance-a')
+  assert.equal(snapshot.observationWarnings[0].unknown, true)
+  assert.ok(calls.some(call => Array.isArray(call) && call[0] === 'snapshot' && call[1] === 'new-owner-binding'))
+  failDelete = false
+  const final = await select(service)
+  assert.deepEqual(final.observationWarnings, [])
+})
+
+test('cleanup failures with identical errors retain distinct originating observation bindings', async () => {
+  const { service, integration } = setup()
+  const first = await select(service)
+  integration.detach = async () => { throw Object.assign(new Error('cleanup unknown'), { code: 'sdk_timeout', unknown: true }) }
+  const second = await select(service, 'chat-a', 'usb:USB-0002')
+  const third = await select(service)
+  assert.deepEqual(new Set(third.observationWarnings.map(w => w.observationSource.bindingId)), new Set([first.bindingId, second.bindingId]))
+  assert.equal(third.observationWarnings.length, 2)
+  assert.ok(third.observationWarnings.every(w => w.unknown === true && w.observationSource.phase === 'cleanup'))
+})
+
 test('dispose stops later steps, waits for in-flight evidence, and revokes only owned observation refs', async () => {
   let release, entered
   const gate = new Promise(resolve => { release = resolve })

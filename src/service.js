@@ -21,6 +21,8 @@ function requestFields(value, allowed, required = allowed) {
 }
 function fail(code, message) { throw Object.assign(new Error(message), { code }) }
 function errorDTO(error, action = null) { return { code: typeof error.code === 'string' ? error.code : typeof error.kind === 'string' ? error.kind : 'backend_error', message: error.message, action, ...(typeof error.unknown === 'boolean' ? { unknown: error.unknown } : {}), ...(error.controlEffect ? { controlEffect: clone(error.controlEffect) } : {}) } }
+function observationWarning(error, b, phase) { return { ...errorDTO(error), observationSource: { phase, instanceId: b.owner?.instance_id ?? null, bindingId: b.id, sdkBindingId: b.owner?.binding_id ?? null, targetId: b.target?.targetId ?? b.owner?.target_id ?? null } } }
+const uniqueWarnings = warnings => [...new Map(warnings.map(warning => [JSON.stringify(warning), warning])).values()]
 function publicIdentity(identity) { return identity ? { uid: identity.uid, runNonce: identity.run_nonce } : null }
 function sameIdentity(a, b) { return a && b && a.uid === b.uid && a.runNonce === b.runNonce }
 
@@ -88,7 +90,7 @@ export function createFieldkitService(config = {}, dependencies = {}) {
         pendingRelease.delete(b)
         if (forget) bindings.delete(b.id)
         return null
-      } catch (error) { pendingRelease.add(b); return errorDTO(error) }
+      } catch (error) { pendingRelease.add(b); return observationWarning(error, b, 'cleanup') }
     })()
     try { return await b.releaseRequest } finally { b.releaseRequest = null }
   }
@@ -99,7 +101,7 @@ export function createFieldkitService(config = {}, dependencies = {}) {
       if (disposed || b.expired || b.released) return
       const startedAt = performance.now()
       try { b.renewal = b.client.renew(b.owner); await b.renewal }
-      catch (error) { b.expired = true; b.observationWarnings.push(errorDTO(error)); pendingRelease.add(b) }
+      catch (error) { b.expired = true; b.observationWarnings.push(observationWarning(error, b, 'renewal')); pendingRelease.add(b) }
       finally { b.renewal = null }
       if (b.expired || disposed) await releaseBinding(b, false)
       else scheduleRenewal(b, Math.max(0, 30000 - (performance.now() - startedAt)))
@@ -207,7 +209,7 @@ export function createFieldkitService(config = {}, dependencies = {}) {
         const ownerClient = mode !== 'legacy-cli' ? http() : null
         if (ownerClient) owner = await ownerClient.bind({ instance_id: context.instanceId, target_id: target.targetId, intent: request.intent, ...(mode === 'service-v2' ? { lease_ms: 120000 } : {}), ...(request.intent === 'attach' ? { expected_identity: { uid: target.identity.uid, run_nonce: target.identity.runNonce }, connection_generation: target.connectionGeneration } : {}) })
         if (disposed || revision !== context.selectionRevision) { if (owner) await releaseBinding({ id: randomUUID(), owner, sessionId, client: ownerClient }); fail('stale_selection', 'A newer target selection replaced this request') }
-        const b = { id: randomUUID(), sessionId, target: clone(target), owner, client: ownerClient, expired: false, snapshot: null, observationWarnings: warnings.filter((w, i) => warnings.findIndex(v => v.code === w.code && v.message === w.message) === i) }
+        const b = { id: randomUUID(), sessionId, target: clone(target), owner, client: ownerClient, expired: false, snapshot: null, observationWarnings: uniqueWarnings(warnings) }
         bindings.set(b.id, b)
         context.selectedBindingId = b.id
         context.latestRunId = null
@@ -305,7 +307,7 @@ export function createFieldkitService(config = {}, dependencies = {}) {
         const warnings = []
         for (const b of new Set([...bindings.values(), ...pendingRelease])) { const error = await releaseBinding(b); if (error) warnings.push(error) }
         owner?.dispose()
-        return { disposed: true, observationWarnings: warnings.filter((w, i) => warnings.findIndex(v => v.code === w.code && v.message === w.message) === i) }
+        return { disposed: true, observationWarnings: uniqueWarnings(warnings) }
       })()
       return disposal
     },

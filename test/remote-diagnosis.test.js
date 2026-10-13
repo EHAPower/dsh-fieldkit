@@ -10,6 +10,15 @@ const codec = method => TYPERT_REMOTE.descriptors.find(d => d.method === method)
 const identity = { uid: 'a'.repeat(24), runNonce: 'b'.repeat(32) }
 const nativeJsonText = ' {"value":18446744073709551615,"decimal":0.123456789} \n'
 
+test('generated snapshot codec preserves old observation cleanup source without changing current binding readiness', () => {
+  const warning = { code: 'unauthorized', message: 'original observation cleanup failed', action: null, unknown: true, observationSource: { phase: 'cleanup', instanceId: 'old-instance', bindingId: 'old-observation', sdkBindingId: 'old-sdk-binding', targetId: 'usb:old' } }
+  const value = { bindingId: 'current-observation', targetId: 'usb:new', transport: 'usb', instanceId: 'new-instance', connectionGeneration: '2', identity, expired: false, observationWarnings: [warning], readiness: { ready: true, reasonCode: null }, telemetryReceivedAgeMs: '0', nativeJsonText, receivedAt: '2026-10-14T00:00:00.000Z', readRun: null }
+  const parsed = codec('getSnapshot').parse(value)
+  assert.deepEqual(parsed.observationWarnings[0], warning)
+  assert.equal(parsed.instanceId, 'new-instance')
+  assert.equal(parsed.readiness.ready, true)
+})
+
 for (const kind of ['process_failed', 'identity_changed', 'malformed_json']) test(`generated Remote codecs retain legacy ${kind} partial results`, async () => {
   const processError = { name: 'Error', message: 'synthetic SDK failure', code: 1, signal: null, killed: false }
   const failure = { action: 'status', kind, message: 'synthetic first failure' }
