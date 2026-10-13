@@ -1,4 +1,6 @@
+import { takeOpenedBinding } from './observation.js'
 import React, { useEffect, useRef, useState } from 'react'
+import type { FieldkitServiceSettings, FieldkitServiceStatus } from './remote-types.js'
 import { TYPERT_REMOTE } from '../lib/typert.remote-client.js'
 
 export const name = '@ehapower/dsh-fieldkit'
@@ -58,6 +60,9 @@ function FieldkitPanel(props: any) {
   const { remote, sessions, ensureSession, SessionProvider, renderSlot } = props
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [reference, setReference] = useState<any>(null)
+  const [serviceStatus, setServiceStatus] = useState<FieldkitServiceStatus | null>(null)
+  const [serviceSettings, setServiceSettings] = useState<FieldkitServiceSettings | null>(null)
+  const [shutdownConfirmed, setShutdownConfirmed] = useState(false)
   const [describe, setDescribe] = useState<any>(null)
   const [targets, setTargets] = useState<any[]>([])
   const [discovery, setDiscovery] = useState<{ limited: boolean; reason: string | null }>({ limited: false, reason: null })
@@ -86,14 +91,16 @@ function FieldkitPanel(props: any) {
     mounted.current = true
     let released = false
     let retained: any
+    let retainedSessionId: string | null = null
     void ensureSession(sessions).then((id: string) => {
       if (released) return
+      retainedSessionId = id
       retained = sessions.retain(id, { source: 'fieldkit' })
       setSessionId(id)
       setReference(retained)
       setNotice('就绪。按钮操作不需要模型。')
     }).catch((error: unknown) => { if (!released) setNotice(`无法创建内嵌对话：${errorText(error)}`) })
-    return () => { released = true; mounted.current = false; epoch.current++; runEpoch.current++; retained?.release() }
+    return () => { released = true; mounted.current = false; epoch.current++; runEpoch.current++; retained?.release(); const selected = bindingRef.current; if (retainedSessionId && selected) void remote.detachTarget(retainedSessionId, { bindingId: selected.bindingId }).catch(() => {}) }
   }, [sessions, ensureSession])
 
   useEffect(() => {
@@ -109,6 +116,7 @@ function FieldkitPanel(props: any) {
       const nextDescribe = valueOf(await remote.describe())
       if (!current(ticket)) return
       setDescribe(nextDescribe)
+      if (nextDescribe.mode === 'service-v2') { const status = valueOf(await remote.serviceStatus()); if (!current(ticket)) return; setServiceStatus(status); setServiceSettings(status.settings) }
       if (!nextDescribe.available) {
         setTargets([]); setDiscovery({ limited: false, reason: null })
         setSnapshot(null); setReadRun(null)
@@ -165,6 +173,27 @@ function FieldkitPanel(props: any) {
     return () => { active = false; if (timer) clearTimeout(timer) }
   }, [visible, sessionId, binding?.bindingId, readRun?.readRunId, readRun?.status, readRun?.phase, remote, viewEpoch])
 
+  const manageService = async (action: 'save' | 'attach' | 'start' | 'shutdown') => {
+    if (!serviceSettings || !begin()) return
+    const ticket = invalidate()
+    setNotice(({ save: '正在保存服务设置…', start: '正在检查工具版本、启动服务并核对认证实例…', attach: '正在发现服务并核对认证实例…', shutdown: '正在请求仅退出服务；不会请求设备 Stop…' })[action])
+    try {
+      const result = action === 'save' ? await remote.saveServiceSettings(serviceSettings)
+        : action === 'start' ? await remote.startService()
+        : action === 'attach' ? await remote.attachService()
+        : await remote.shutdownService({ instanceId: serviceStatus?.instance?.instance_id ?? '', confirmation: shutdownConfirmed ? 'shutdown_service_without_stopping_devices' : '' })
+      if (!current(ticket)) return
+      const status = valueOf(result)
+      setServiceStatus(status); setServiceSettings(status.settings); setShutdownConfirmed(false)
+      if (status.error) { setNotice(`服务操作未完成：${errorText(status.error)}`); return }
+      setTargets([]); setSnapshot(null); setReadRun(null)
+      if (bindingRef.current) selectBinding({ ...bindingRef.current, expired: true })
+      setNotice(action === 'shutdown' ? '服务已受理退出；没有请求设备 Stop，不能据此认定设备停止。' : action === 'save' ? '设置已保存。请发现或启动服务，再刷新目标。' : '服务已认证附着。请刷新目标并明确选择设备。')
+    } catch (error) {
+      if (current(ticket)) { setNotice(`服务操作失败：${errorText(error)}`); if (bindingRef.current) selectBinding({ ...bindingRef.current, expired: true }); setSnapshot(null) }
+    } finally { end() }
+  }
+
   const openTarget = async (target: any) => {
     if (!sessionId || !begin()) return
     const ticket = invalidate()
@@ -172,8 +201,8 @@ function FieldkitPanel(props: any) {
       const request = target.connected
         ? { targetId: target.targetId, intent: 'attach', expectedIdentity: target.identity, connectionGeneration: target.connectionGeneration }
         : { targetId: target.targetId, intent: 'connect' }
-      const next = valueOf(await remote.openTarget(sessionId, request))
-      if (!current(ticket)) return
+      const next = await takeOpenedBinding(remote.openTarget(sessionId, request).then(valueOf), () => current(ticket), (late: any) => remote.detachTarget(sessionId, { bindingId: late.bindingId }).then(valueOf))
+      if (!next) return
       selectBinding(next)
       setSnapshot(null)
       setReadRun(null)
@@ -224,7 +253,7 @@ function FieldkitPanel(props: any) {
           setSnapshot(null)
           if (['instance_mismatch', 'binding_stale', 'identity_changed', 'not_found'].includes(next.error?.code)) selectBinding({ ...selected, expired: true })
         }
-        setNotice(next.complete ? '只读诊断采集完成；完整性不代表设备安全。' : `诊断未完成：${next.error ? errorText(next.error) : '请查看部分证据和报告。'}`)
+        setNotice(next.reportError ? `${next.complete ? '采集完成' : '采集未完成'}，但报告保存失败：${errorText(next.reportError)}；当前页面仍可查看已取得证据。` : next.complete ? '只读诊断采集完成；完整性不代表设备安全。' : `诊断未完成：${next.error ? errorText(next.error) : '请查看部分证据和报告。'}`)
       }
     } catch (error) {
       if (current(ticket, selected.bindingId) && runEpoch.current === runTicket) { setReadRun(null); setSnapshot(null); setNotice(`诊断请求失败：${errorText(error)}`) }
@@ -234,7 +263,7 @@ function FieldkitPanel(props: any) {
   const checkConfiguration = async () => {
     if (!begin()) return
     const ticket = epoch.current
-    try { const result = valueOf(await remote.checkConfiguration(configText)); if (current(ticket)) { setConfigResult(result); setNotice('离线配置检查已完成。') } }
+    try { const result = valueOf(await remote.checkConfiguration(configText)); if (current(ticket)) { setConfigResult(result); setNotice(result.summary) } }
     catch (error) { if (current(ticket)) setNotice(`配置检查失败：${errorText(error)}`) } finally { end() }
   }
 
@@ -270,6 +299,24 @@ function FieldkitPanel(props: any) {
         legacy && React.createElement('p', null, 'Legacy CLI 是六次离散命令采集，不是持续 owner 会话或同一时刻快照；不会自动回退。'),
         discovery.limited && React.createElement('p', { role: 'alert' }, `目标发现不完整：${text(discovery.reason)}`),
       ),
+      describe?.mode === 'service-v2' && React.createElement('section', { style: styles.card, 'aria-label': '服务设置' },
+        React.createElement('h2', null, '服务设置'),
+        React.createElement('p', null, '关闭页面或卸载插件只解除观察，服务保持独立运行。重新附着不会恢复设备连接、心跳或目标。'),
+        serviceSettings && (['toolPath', 'dataDir', 'port', 'runsDir', 'odrivePython'] as const).map(key => React.createElement('label', { key, style: { display: 'block', marginBottom: 8 } },
+          ({ toolPath: 'eha-tool 绝对路径', dataDir: '私有数据目录（0700）', port: '服务端口', runsDir: '记录目录（可选）', odrivePython: 'ODrive Python 绝对路径（可选）' })[key],
+          React.createElement('input', { value: serviceSettings[key], type: key === 'port' ? 'number' : 'text', min: key === 'port' ? 1 : undefined, max: key === 'port' ? 65535 : undefined, disabled: busy, style: { display: 'block', width: '100%', boxSizing: 'border-box' }, onChange: (event: React.ChangeEvent<HTMLInputElement>) => setServiceSettings({ ...serviceSettings, [key]: key === 'port' ? Number(event.target.value) : event.target.value }) }))),
+        React.createElement('div', { style: styles.row },
+          React.createElement('button', { style: styles.button, disabled: busy || !serviceSettings, onClick: () => manageService('save') }, '保存设置'),
+          React.createElement('button', { style: styles.button, disabled: busy || !serviceSettings, onClick: () => manageService('attach') }, '发现 / 附着服务'),
+          React.createElement('button', { style: styles.button, disabled: busy || !serviceSettings, onClick: () => manageService('start') }, '启动服务')),
+        serviceStatus?.error && React.createElement('p', { role: 'alert' }, errorText(serviceStatus.error)),
+        serviceStatus?.instance && React.createElement(React.Fragment, null,
+          React.createElement('p', null, `服务：${serviceStatus.instance.service_state}　版本：${serviceStatus.instance.tool_version}　实例：${serviceStatus.instance.instance_id}　PID：${serviceStatus.instance.pid}`),
+          React.createElement('p', null, `设备效果：${serviceStatus.instance.control_effect.state}（${text(serviceStatus.instance.control_effect.reason_code)}）；活动试验：${serviceStatus.instance.activity.trial_active ? '是' : '否'}；未决试验：${serviceStatus.instance.activity.trial_unresolved ? '是' : '否'}`),
+          serviceStatus.instance.sessions.map(item => React.createElement('p', { key: item.session_id }, `${item.session_id}：连接 ${item.connected ? '是' : '否'} / 心跳 ${item.heartbeat_active ? '活动' : '未活动'} / 记录 ${item.recording_active ? '活动' : '未活动'}`))),
+        React.createElement('label', { style: { display: 'block' } }, React.createElement('input', { type: 'checkbox', checked: shutdownConfirmed, disabled: busy, onChange: (event: React.ChangeEvent<HTMLInputElement>) => setShutdownConfirmed(event.target.checked) }), '我确认仅退出当前服务；不会发送设备 Stop，活动心跳、试验和未决效果需人工判断。'),
+        React.createElement('button', { style: styles.button, disabled: busy || !serviceStatus?.attached || !shutdownConfirmed, onClick: () => manageService('shutdown') }, '确认退出服务'),
+      ),
       React.createElement('div', { style: styles.card }, React.createElement('h2', null, '目标'),
         targets.length === 0 ? React.createElement('p', null, '未发现可用目标。') : targets.map((target: any) => React.createElement('div', { key: target.targetId, style: { ...styles.row, padding: '8px 0', borderTop: '1px solid var(--dsh-border, #334)' } },
           React.createElement('strong', null, target.label),
@@ -284,6 +331,7 @@ function FieldkitPanel(props: any) {
         warnings.map((warning: any, index: number) => React.createElement('p', { key: index, role: 'alert' }, `owner 引用警告：${errorText(warning)}`)),
         snapshot && React.createElement(React.Fragment, null,
           React.createElement('p', null, legacy ? 'Legacy CLI 无持续 owner 读取门。' : `读取门：${snapshot.readiness?.ready ? '可读取' : `阻止 (${text(snapshot.readiness?.reasonCode)})`}`),
+          snapshot.controlEffect && React.createElement('p', { role: snapshot.controlEffect.state === 'unknown' ? 'alert' : undefined }, `设备效果：${snapshot.controlEffect.state}（${text(snapshot.controlEffect.reason_code)}）；读取成功不代表设备停止或安全。`),
           snapshot.nativeJsonText && React.createElement('pre', { style: styles.mono }, snapshot.nativeJsonText)),
       ),
       React.createElement('div', { style: styles.card }, React.createElement('h2', null, '诊断进度'),
@@ -291,6 +339,11 @@ function FieldkitPanel(props: any) {
         React.createElement('ol', null, steps.map(step => React.createElement('li', { key: step }, `${evidenceSteps.includes(step) ? '已取得' : '等待'}：${STEP_LABELS[step]}`))),
         evidence.map((item: any, index: number) => React.createElement('details', { key: `${item.action}-${index}` },
           React.createElement('summary', null, `${STEP_LABELS[evidenceSteps[index]] ?? item.action} · ${text(item.receivedAt)}${item.error ? ` · ${errorText(item.error)}` : ''}`),
+          React.createElement('p', null, `连接代次：${text(item.connectionGeneration)}；来源时钟：${text(item.sourceTimestamp?.clock)} / ${text(item.sourceTimestamp?.value)}；接收年龄 ms：${text(item.receivedAgeMs)}`),
+          item.readPermit && React.createElement('p', null, `本步读取许可：${item.readPermit.ready ? '可读取' : '阻止'}（${text(item.readPermit.reason_code)}）；设备效果：${text(item.controlEffect?.state)}（${text(item.controlEffect?.reason_code)}）`),
+          item.exitCode !== undefined && React.createElement('p', null, `进程退出码：${text(item.exitCode)}；信号：${text(item.processError?.signal)}`),
+          item.parseError && React.createElement('p', { role: 'alert' }, `解析失败：${item.parseError}`),
+          item.dataUtf8 !== undefined && React.createElement('details', null, React.createElement('summary', null, '配置原始载荷'), React.createElement('pre', { style: styles.mono }, item.dataUtf8 ?? item.dataHex)),
           React.createElement('pre', { style: styles.mono }, item.nativeJsonText ?? item.stdout ?? ''),
           item.stderr && React.createElement('pre', { style: styles.mono }, item.stderr))),
         readRun?.error && React.createElement('p', { role: 'alert' }, `首个错误：${errorText(readRun.error)}`),
@@ -301,7 +354,9 @@ function FieldkitPanel(props: any) {
       React.createElement('div', { style: styles.card }, React.createElement('h2', null, '离线配置检查'),
         React.createElement('textarea', { value: configText, onChange: (event: any) => setConfigText(event.target.value), placeholder: '粘贴完整配置原文；不会写入设备。', rows: 8, style: { width: '100%', boxSizing: 'border-box' } }),
         React.createElement('button', { style: styles.button, disabled: busy || configText.length === 0, onClick: checkConfiguration }, '检查原文配置'),
-        configResult && React.createElement('pre', { style: styles.mono }, `${configResult.summary}\n${(configResult.issues ?? []).join('\n')}\n${configResult.stdout ?? ''}\n${configResult.stderr ?? ''}${configResult.error ? `\n${errorText(configResult.error)}` : ''}`),
+        configResult && React.createElement(React.Fragment, null,
+          React.createElement('p', { role: 'status' }, configResult.summary),
+          React.createElement('details', null, React.createElement('summary', null, 'SDK 校验详情'), React.createElement('pre', { style: styles.mono }, configResult.stderr || configResult.stdout || (configResult.error ? errorText(configResult.error) : '无附加输出')))),
       ),
     ),
     React.createElement('aside', { className: 'fieldkit-chat', style: styles.card, 'aria-label': 'Fieldkit 对话' },

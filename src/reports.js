@@ -5,7 +5,7 @@ import { isAbsolute, join } from 'node:path'
 export async function writeReport(reportsDir, diagnosis) {
   if (typeof reportsDir !== 'string' || !isAbsolute(reportsDir)) throw new TypeError('reportsDir must be an absolute user-data path')
   await mkdir(reportsDir, { recursive: true, mode: 0o700 })
-  const integration = diagnosis.mode === 'integration'
+  const integration = ['integration', 'service-v2'].includes(diagnosis.mode)
   const report = {
     formatVersion: integration ? 2 : 1,
     generatedAt: new Date().toISOString(),

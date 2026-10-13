@@ -7,7 +7,11 @@ import { createFieldkitService } from './service.js'
 export const name = 'dsh-fieldkit'
 export const inject = ['tools', 'skills']
 export const Config = Schema.object({
-  deviceMode: Schema.union(['integration', 'legacy-cli']).default('integration').description('Use the persistent official eha-tool owner, or explicitly opt into separate legacy CLI snapshots. No automatic fallback.'),
+  deviceMode: Schema.union(['service-v2', 'integration', 'legacy-cli']).default('service-v2').description('Use the persistent official eha-tool owner, or explicitly opt into separate legacy CLI snapshots. No automatic fallback.'),
+  servicePort: Schema.number().default(18080).description('本地 v2 服务端口；可在服务设置中更新。'),
+  serviceDataDir: Schema.string().description('服务私有数据目录，默认当前用户系统数据目录。'),
+  runsDir: Schema.string().description('可选记录输出目录的绝对路径。'),
+  odrivePython: Schema.string().description('可选 ODrive Python 解释器绝对路径。'),
   integrationUrl: Schema.string().description('Explicit HTTP loopback origin of the official eha-tool webui, for example http://127.0.0.1:8080.'),
   integrationTokenFile: Schema.string().description('Absolute local mode-0600 token file; credentials stay in the host process.'),
   toolPath: Schema.string().description('Absolute public eha-tool executable path for offline config-check and explicit legacy mode.'),
@@ -35,7 +39,7 @@ function toolRun(run) {
     remaining -= native.bytes
     const stderr = excerpt(item.stderr ?? '', Math.min(8 * 1024 - native.bytes, remaining))
     remaining -= stderr.bytes
-    return { action: item.action, origin: item.origin ?? 'legacy_cli', receivedAt: item.receivedAt, identity: item.identity ?? null, sourceTimestamp: item.sourceTimestamp ?? null, error: item.error ? { ...item.error, message: excerpt(item.error.message ?? '', 1024).text } : null, nativeJsonText: native.text, stderr: stderr.text, truncated: native.truncated || stderr.truncated, nativeTextBytes: Buffer.byteLength(raw) }
+    return { action: item.action, origin: item.origin ?? 'legacy_cli', receivedAt: item.receivedAt, identity: item.identity ?? null, sourceTimestamp: item.sourceTimestamp ?? null, receivedAgeMs: item.receivedAgeMs ?? null, connectionGeneration: item.connectionGeneration ?? null, nativeQuality: item.nativeQuality ?? null, exitCode: item.exitCode ?? null, processError: item.processError ? { ...item.processError, message: excerpt(item.processError.message ?? '', 1024).text } : null, parseError: item.parseError ? excerpt(item.parseError, 1024).text : null, controlEffect: item.controlEffect ?? null, readPermit: item.readPermit ?? null, error: item.error ? { ...item.error, message: excerpt(item.error.message ?? '', 1024).text } : null, nativeJsonText: native.text, stderr: stderr.text, truncated: native.truncated || stderr.truncated, nativeTextBytes: Buffer.byteLength(raw) }
   })
   return { ...run, error: run.error ? { ...run.error, message: excerpt(run.error.message ?? '', 1024).text } : null, evidence, evidenceBudgetBytes: 32 * 1024, evidenceIsExcerpt: evidence.some(item => item.truncated), fullEvidenceReports: run.reports ?? null }
 }
@@ -45,7 +49,7 @@ export function apply(ctx, config = {}) {
   ctx.provide('fieldkit', service)
   ctx.plugin(FieldkitRemote)
   ctx.on('dispose', () => service.dispose())
-  const legacy = (config.deviceMode ?? 'integration') === 'legacy-cli'
+  const legacy = (config.deviceMode ?? 'service-v2') === 'legacy-cli'
   const diagnosisName = legacy ? 'fieldkit_diagnose_usb' : 'fieldkit_diagnose'
   const allowedTools = new Set(['fieldkit_devices', diagnosisName, 'fieldkit_check_configuration', 'skill', 'ask_user_question', 'present'])
   ctx.tools.guard(execution => {

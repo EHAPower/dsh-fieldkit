@@ -52,3 +52,20 @@ test('tools use exec.agent.id and report guard cannot authorize another chat', a
 test('legacy USB name is available only in explicit legacy CLI mode', () => {
   assert.deepEqual(install({ deviceMode: 'legacy-cli' }).tools.map(t => t.name), ['fieldkit_devices', 'fieldkit_diagnose_usb', 'fieldkit_check_configuration'])
 })
+
+test('model evidence preserves read quality and distinct process facts within existing text budget', async () => {
+  const { tools, service } = install()
+  const permit = { ready: true, reason_code: null }
+  service.diagnose = async () => ({ evidence: [{ action: 'status', nativeJsonText: 'x'.repeat(12000), readPermit: permit, controlEffect: { state: 'unknown', reason_code: 'unresolved_target' }, sourceTimestamp: { clock: 'device_monotonic_us', value: '18446744073709551615' }, receivedAgeMs: '42', connectionGeneration: '9007199254740993', nativeQuality: null, exitCode: 2, processError: { name: 'Error', code: 2, message: 'e'.repeat(2000), signal: null, killed: false } }], reportError: { code: 'report_write_failed', message: 'ENOSPC' }, reports: null })
+  const run = await tools[1].execute({ bindingId: 'selected' }, { agent: { id: 'chat' } })
+  assert.deepEqual(run.evidence[0].readPermit, permit)
+  assert.equal(run.evidence[0].controlEffect.state, 'unknown')
+  assert.equal(run.evidence[0].receivedAgeMs, '42')
+  assert.equal(run.evidence[0].connectionGeneration, '9007199254740993')
+  assert.equal(run.evidence[0].exitCode, 2)
+  assert.equal(run.evidence[0].processError.code, 2)
+  assert.equal(run.reportError.code, 'report_write_failed')
+  assert.ok(Buffer.byteLength(run.evidence[0].processError.message) <= 1024)
+  assert.ok(Buffer.byteLength(run.evidence[0].nativeJsonText) <= 8192)
+  assert.equal(run.evidenceBudgetBytes, 32768)
+})

@@ -1,6 +1,9 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import type {
+  FieldkitServiceStatus,
+  FieldkitServiceSettings,
+  FieldkitShutdownRequest,
   FieldkitBinding,
   FieldkitBindingRequest,
   FieldkitCancelReadRunRequest,
@@ -27,6 +30,21 @@ export class FieldkitRemote extends TypertRemoteService {
   constructor(ctx: Context) {
     super(ctx, 'fieldkitRemote', { namespace: 'fieldkit' })
   }
+
+  @Remote('serviceStatus')
+  serviceStatus(): Promise<FieldkitServiceStatus> { return this.ctx.fieldkit.serviceStatus() }
+
+  @Remote('saveServiceSettings')
+  saveServiceSettings(request: FieldkitServiceSettings): Promise<FieldkitServiceStatus> { return this.ctx.fieldkit.saveServiceSettings(request) }
+
+  @Remote('startService')
+  startService(): Promise<FieldkitServiceStatus> { return this.ctx.fieldkit.startService() }
+
+  @Remote('attachService')
+  attachService(): Promise<FieldkitServiceStatus> { return this.ctx.fieldkit.attachService() }
+
+  @Remote('shutdownService')
+  shutdownService(request: FieldkitShutdownRequest): Promise<FieldkitServiceStatus> { return this.ctx.fieldkit.shutdownService(request) }
 
   @Remote('describe')
   describe(): Promise<FieldkitDescribe> { return this.ctx.fieldkit.describe() }

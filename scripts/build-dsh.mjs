@@ -3,14 +3,14 @@ import { existsSync } from 'node:fs'
 import { dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
+import { WorkspaceAnalyzer, FaceModelEmitter } from '@deepseek-ai/dsh-typert-generator'
+import { withFieldkitRemotes } from './fieldkit-remote-model.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const scratch = join(root, '.dsh', 'typert-build')
 const workspace = join(scratch, 'workspace')
 const packageDir = join(workspace, 'packages', 'dsh-fieldkit')
-const generatedPackage = join(root, 'node_modules', '@deepseek-ai', 'dsh-typert-generator')
-const stageGenerator = join(workspace, 'node_modules', '@deepseek-ai', 'dsh-typert-generator')
-const tsc = join(generatedPackage, 'node_modules', '.bin', 'tsc')
+const tsc = join(root, 'node_modules', '.bin', 'tsc')
 const tsdown = join(root, 'node_modules', '.bin', 'tsdown')
 
 function run(command, args, cwd = root) {
@@ -22,23 +22,8 @@ async function json(path, value) {
   await writeFile(path, `${JSON.stringify(value, null, 2)}\n`)
 }
 
-async function patchGenerator() {
-  const manifest = JSON.parse(await readFile(join(stageGenerator, 'package.json'), 'utf8'))
-  if (manifest.version !== '0.2.0-rc.2') throw new Error(`Unsupported dsh-typert-generator ${manifest.version}; this compatibility patch is only audited for 0.2.0-rc.2`)
-  const patches = [
-    ['lib/types/analyzer.js', "        if (registration?.name === '@deepseek-ai/dsh-typert-protocol')\n            return true;\n", "        if (externalModuleIdentityForFile(declaration.getSourceFile().fileName)?.package === '@deepseek-ai/dsh-typert-protocol')\n            return true;\n"],
-    ['lib/index.js', 'if (this.registrationForFile(declaration.getSourceFile().fileName)?.name === "@deepseek-ai/dsh-typert-protocol") return true;', 'if (externalModuleIdentityForFile(declaration.getSourceFile().fileName)?.package === "@deepseek-ai/dsh-typert-protocol") return true;'],
-  ]
-  for (const [file, needle, addition] of patches) {
-    const path = join(stageGenerator, file)
-    const source = await readFile(path, 'utf8')
-    if (!source.includes(needle)) throw new Error(`Unsupported dsh-typert-generator 0.2.0-rc.2 layout: protocol identity predicate changed in ${file}`)
-    await writeFile(path, source.replace(needle, `${needle}\n\t\t${addition}`))
-  }
-}
-
 async function main() {
-  if (!existsSync(generatedPackage) || !existsSync(tsc) || !existsSync(tsdown)) {
+  if (!existsSync(tsc) || !existsSync(tsdown)) {
     throw new Error('Install the pinned build dependencies with npm ci --ignore-scripts before building')
   }
   await rm(scratch, { recursive: true, force: true })
@@ -47,8 +32,6 @@ async function main() {
   await mkdir(join(packageDir, 'src'), { recursive: true })
   await cp(join(root, 'src', 'remote.ts'), join(packageDir, 'src', 'remote.ts'))
   await cp(join(root, 'src', 'remote-types.ts'), join(packageDir, 'src', 'remote-types.ts'))
-  await cp(generatedPackage, stageGenerator, { recursive: true })
-  await patchGenerator()
 
   const stageManifest = {
     name: '@ehapower/dsh-fieldkit', version: '0.2.0', private: true, type: 'module',
@@ -67,6 +50,7 @@ async function main() {
   await json(join(packageDir, 'package.json'), stageManifest)
   await json(join(workspace, 'package.json'), { private: true, type: 'module' })
   await json(join(workspace, 'tsconfig.host.json'), {
+    compilerOptions: { module: 'NodeNext', moduleResolution: 'NodeNext', target: 'ES2024', strict: true },
     files: [], references: [{ path: './packages/dsh-fieldkit/tsconfig.project.json' }],
   })
   await json(join(workspace, 'tsconfig.client.json'), {
@@ -80,14 +64,17 @@ async function main() {
     },
     include: ['./src/remote.ts', './src/remote-types.ts'],
   })
-  await writeFile(join(workspace, 'tsdown.config.mjs'), `import { defineConfig } from 'tsdown'\nimport { typertPlugin } from '@deepseek-ai/dsh-typert-generator/tsdown'\nexport default defineConfig({ entry: { remote: './packages/dsh-fieldkit/src/remote.ts', 'remote-types': './packages/dsh-fieldkit/src/remote-types.ts' }, outDir: './packages/dsh-fieldkit/lib', format: 'esm', clean: false, dts: false, plugins: [typertPlugin({ mode: 'package', faces: ['host'] })] })\n`)
-
   run(tsc, ['-b', '--force', 'tsconfig.host.json'], workspace)
-  run(tsdown, ['--config', 'tsdown.config.mjs'], workspace)
-  for (const file of ['typert.host.js', 'typert.host.d.ts', 'typert.remote-client.js', 'typert.remote-client.d.ts', 'typert.remote-client.d.ts.map']) {
-    const from = join(packageDir, 'lib', file)
-    if (!existsSync(from)) throw new Error(`Typert generator did not emit ${file}`)
-    await cp(from, join(root, 'lib', file))
+  const model = new WorkspaceAnalyzer({ root: workspace, faces: ['host'], packages: [stageManifest.name], checkDiagnostics: false }).analyze()
+  const face = withFieldkitRemotes(model.faces[0], await readFile(join(packageDir, 'src/remote.ts'), 'utf8'), stageManifest.name)
+  const artifact = new FaceModelEmitter(face).emit(stageManifest.name)
+  if (!artifact.remote) throw new Error('Official emitter did not emit the Fieldkit Remote contract')
+  for (const [file, content] of Object.entries({
+    'typert.host.js': artifact.js, 'typert.host.d.ts': artifact.dts,
+    'typert.remote-client.js': artifact.remote.js, 'typert.remote-client.d.ts': artifact.remote.dts,
+    'typert.remote-client.d.ts.map': artifact.remote.dtsMap,
+  })) {
+    await writeFile(join(root, 'lib', file), content)
   }
 
   await json(join(scratch, 'tsconfig.runtime.json'), {

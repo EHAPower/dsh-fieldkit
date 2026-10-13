@@ -1,31 +1,32 @@
 # @ehapower/dsh-fieldkit
 
-面向现场支持人员的 DeepSeek Harness 插件。默认进入 EHA 工作台：点击按钮选择目标、查看缓存、执行只读诊断、检查配置记录并保存证据；右侧保留原生对话，用于提问和解释结果。按钮操作不需要模型调用。
+面向现场支持人员的 DeepSeek Harness 插件。默认进入 EHA 工作台：点击按钮配置、发现或启动本机服务，再选择目标、查看缓存、执行只读诊断、检查配置记录并保存证据；右侧保留原生对话，用于提问和解释结果。按钮操作不需要模型调用。
 
-设备连接和协议由公开 [`eha-sdk`](https://github.com/EHAPower/eha-sdk) 的官方 `eha-tool` 持有。按钮与对话工具共用一个 Fieldkit 服务，按对话保存目标绑定。本阶段只接入 EHA，不包含设备写入、运动、停止、复位或维护入口。
+设备连接和协议由公开 [`eha-sdk`](https://github.com/EHAPower/eha-sdk) 的官方 `eha-tool` 持有。按钮与对话工具共用一个 Fieldkit 服务，按对话保存目标绑定。当前 P1 提供本机服务生命周期、EHA 只读诊断和离线配置检查，不包含设备写入、运动、Stop、复位或维护入口。服务接口的精确协议以 SDK 的唯一规范 [`crates/tool/service-api.md`](https://github.com/EHAPower/eha-sdk/blob/main/crates/tool/service-api.md) 为准。
 
 ## 兼容范围
 
 | 组件 | 本版本要求 |
 | --- | --- |
 | DeepSeek Harness | `0.2.0-rc.2`，保持精确版本；其他版本需要重新验证。 |
-| eha-tool 持久服务 | 支持 `eha-tool.integration.v1`、DTO 版本 1、配置格式版本 1。 |
+| eha-tool 持久服务 | 默认使用 `eha-tool.service.v2` / API 版本 2；必须提供当前只读、服务生命周期及 `binding_lease` / `binding_renew` 能力。 |
 | 主机 | 持久服务的凭据文件校验面向 macOS / Linux；开发和软件验证在 devbox 中执行。 |
+| v1 兼容入口 | 仅显式选择 `integration` 时使用 `/integration/v1`，不会自动升级为 v2。 |
 | 旧 eha-tool | 可显式选择 `legacy-cli`，使用原有六次 USB CLI 采集。不会自动回落此模式。 |
 
-持久服务依赖本次配套的 eha-tool 改动。该改动合入公开 SDK 前，不能假定公开 `main` 或已安装的旧二进制包含 `/integration/v1`。
+所用 eha-tool 必须来自包含对应服务接口实现的 SDK 版本；不能假定公开 `main` 或已安装的旧二进制已具备本次配套能力。版本不符、认证失败和连接失败都会拒绝操作，不自动切换模式或直连设备。
 
-DSH 的 Host / Client、面板和 Remote 使用发布包提供的接口。rc.2 的官方 Typert 生成器存在第三方 npm 协议符号识别缺口，本包在构建时应用一个限定版本的兼容补丁；DSH 运行时保持原样。Remote 类型从公开子路径导出，Client 按官方延迟 CJS 工厂格式打包。构建遇到不匹配的生成器版本应停止，不能静默生成不完整清单。
+DSH 的 Host / Client、面板和 Remote 使用发布包提供的接口，官方 DSH 源码、依赖和运行时不作修改。当前 P0 构建由插件从自身源码和 DTO 构造受限 Remote 模型，再使用官方 Typert generator 的公开分析与生成接口；不修改 generator 或生成物。该路径仅支持当前插件使用的 JSON Remote 形状，超出范围时构建失败，不能静默生成不完整清单。Remote 类型从公开子路径导出，Client 按官方延迟 CJS 工厂格式打包。
 
 ## 构建与安装
 
-在开发容器中执行：
+在本机开发时优先进入已有 devbox 容器，在项目目录执行；开发依赖也安装在容器内：
 
 ```sh
 npm ci --ignore-scripts
 npm run build
 npm test
-npm pack --ignore-scripts
+npm pack
 ```
 
 在独立的 `fieldkit` profile 中安装生成的 `.tgz`，将路径替换为本机实际路径：
@@ -38,39 +39,52 @@ dsh plugin --profile fieldkit add /absolute/path/to/ehapower-dsh-fieldkit-0.2.0.
 
 本包提供专用 Fieldkit Agent preset，关闭此 profile 的通用编程 preset，并限制模型可用的工具和 SOP。模型服务仍由 DSH 配置；创建空会话需要有效的默认模型配置和预设，发送问题才需要对应凭据。
 
-## 启动官方工具
+## 配置与启动服务
 
-先从包含本次集成接口的 SDK 源码构建 `eha-tool`：
+在 devbox 开发容器中构建 `eha-tool` 用于开发验证：
 
 ```sh
 cargo build -p eha-tool --release --locked
 ```
 
-使用仓库外的私有目录保存凭据，显式启用集成入口：
+DSH 的 eha-tool 路径须指向与运行主机系统和架构兼容的原生完整发行目录内的可执行文件，发行目录须包含配套 runtime；容器内的 Linux 构建产物不能用于 macOS 主机。原生 SDK 构建与发行打包请按[官方 SDK 说明](https://github.com/EHAPower/eha-sdk#readme)执行，并使用包含本次服务接口的版本。
 
-```sh
-eha-tool webui --port 8080 --integration-token-file /absolute/private/eha-integration.token
-```
-
-eha-tool 首次创建凭据文件，之后重启复用合规文件；Unix 权限为 `0600`。每次进程启动产生新的实例标识，重启后需要重新选择目标。凭据仅由 Fieldkit 后端读取，不传给浏览器、模型或报告。
-
-在 DSH 的 Plugins / Settings 中填写本地 `fieldkit` 配置：
-
-| 字段 | 用途 |
-| --- | --- |
-| `deviceMode` | 默认 `integration`；兼容旧工具时显式设为 `legacy-cli`。 |
-| `integrationUrl` | 官方服务实际回环地址，例如 `http://127.0.0.1:8080`。 |
-| `integrationTokenFile` | 上述凭据文件的绝对路径。 |
-| `toolPath` | 官方 eha-tool 的绝对路径；离线配置检查和 legacy 模式使用。 |
-| `reportsDir` | 保存 Markdown / JSON 诊断报告的绝对目录。 |
-
-然后启动 Harness：
+启动 Harness：
 
 ```sh
 dsh --profile fieldkit --no-open
 ```
 
-Fieldkit 不启动或结束持久 eha-tool 进程。未配置服务、版本不匹配或连接失败时，工作台显示原因并停止对应操作。服务地址只接受本机回环地址，禁止重定向；不使用官方 WebUI 未版本化的内部 `/api/*` 路由。
+默认 `deviceMode` 为 `service-v2`。在工作台“服务设置”中填写并保存以下固定字段：
+
+| 字段 | 用途 |
+| --- | --- |
+| eha-tool 绝对路径 | 官方可执行文件路径；启动服务和离线配置检查使用。 |
+| 私有数据目录 | 服务发现记录和凭据的目录，须由当前用户拥有，权限为 `0700`。默认使用当前用户系统数据目录。 |
+| 服务端口 | 默认 `18080`，仅本机回环地址。 |
+| 记录目录（可选） | 可留空；设置仅转交官方服务，不表示本阶段已开放记录操作。 |
+| ODrive Python 绝对路径（可选） | 可留空；设置仅转交官方服务，不表示本阶段已开放 ODrive 工作流。 |
+
+点击“发现 / 附着服务”使用与设置匹配、可认证的既有实例；未发现服务时点击“启动服务”。启动只创建独立 eha-tool 服务，不自动连接设备、开启心跳或恢复目标。服务设置固定白名单，不接受任意命令或额外参数。保存设置或服务实例改变后，旧目标绑定过期，需重新选择。
+
+Fieldkit 将设置保存在当前用户系统数据目录的私有文件中，服务发现记录和 token 文件权限为 `0600`。服务每次启动产生新的实例标识；发现要核对认证后的实例，文件或 PID 存在不能证明服务可用。token 文件只由主机进程读取，内容不能粘贴到工作台、对话或报告中。
+
+Plugins / Settings 仍提供 `reportsDir`（本机报告绝对目录）与模式配置。显式 `integration` 使用 `integrationUrl` 和 `integrationTokenFile` 附着已运行的 v1 服务；显式 `legacy-cli` 使用 `toolPath` 执行旧 USB CLI。两种兼容模式均不提供 v2 服务设置按钮，不自动回落；须使用包含对应兼容接口的 eha-tool 版本。
+
+需要退出时，先查看当前服务实例、会话、心跳、试验和未决效果摘要，再勾选确认并点击“确认退出服务”。该操作仅请求当前服务退出，不请求设备 Stop；响应表示受理，不能证明服务已退出、目标已撤销或机械停止。超时或断连时结果可能未知，应人工核对。
+
+关闭页面或 DSH 卸载插件只取消后续读取、解除观察，不发送 Stop、不 kill 服务；服务保持独立运行。观察租约由插件后端续约；异常退出后租约到期回收观察名额，不改变设备会话、心跳或目标。返回页面后重新附着服务并明确选择设备，不恢复此前连接、心跳或目标。服务地址只接受本机回环地址，禁止重定向；不使用官方 WebUI 未版本化的内部 `/api/*` 路由。
+
+## 故障后的下一步
+
+| 现象 | 下一步 |
+| --- | --- |
+| 未发现服务 | 核对 eha-tool 路径、端口和私有数据目录，再点击“启动服务”。 |
+| 版本不符或已有记录无法认证 | 核对 SDK 版本、进程、端口、目录和文件权限后人工处理；Fieldkit 不覆盖凭据或终止已有实例。 |
+| 启动等待超时、结果未知 | 点击“发现 / 附着服务”并人工核对进程与端口，不重复启动。 |
+| 绑定过期或身份变化 | 保留已采集证据，刷新目标并明确重新选择；不重放旧请求。 |
+| 读取门拒绝或设备效果为 `unknown` | 查看原因和缓存，保留未决项并由现场负责人判断；读取成功也不清除未知效果。 |
+| 离线配置检查提示缺字段 | 粘贴完整原始配置 JSON；详细 SDK 诊断可展开查看，不自动查找文件或设备记录。 |
 
 ## 工作台流程
 
@@ -82,14 +96,14 @@ Fieldkit 不启动或结束持久 eha-tool 进程。未配置服务、版本不�
 
 离线配置检查接受完整 JSON 原文，通过官方 `config-check` 执行，不访问设备。原文不先经 JavaScript 数值转换再写回；从设备得到的 `native_json_text` 也保留原文，大整数不会因展示而改写。
 
-取消采集只阻止后续步骤；在持久服务模式下，取消选择、切换页面和关闭面板均不发送 Stop，不关闭官方设备连接。浏览器 Remote 中的会话 ID 是同一操作员下的路由参数，不是不同操作员之间的访问控制边界。
+取消采集只阻止后续步骤；在持久服务模式下，取消选择、切换页面和关闭面板均不发送 Stop，不关闭官方设备连接。服务生命周期按钮仅供人工操作，未注册为模型工具。浏览器 Remote 中的会话 ID 是同一操作员下的路由参数，不是不同操作员之间的访问控制边界。
 
 ## 对话工具
 
 | 工具 | 作用 |
 | --- | --- |
 | `fieldkit_devices()` | 返回候选和当前对话选择；枚举本身不等于已连接或身份核对。 |
-| `fieldkit_diagnose({ bindingId })` | 对当前对话的精确绑定执行六个证据步骤，保存完整或部分报告。默认模式使用。 |
+| `fieldkit_diagnose({ bindingId })` | 在 `service-v2` 或显式 `integration` 模式对当前对话的精确绑定执行六个证据步骤，保存完整或部分报告。 |
 | `fieldkit_diagnose_usb({ serial })` | 仅在 `legacy-cli` 模式注册，保留原有六次独立 USB CLI 采集。 |
 | `fieldkit_check_configuration({ record })` | 对用户提供的完整配置记录执行官方离线检查，优先传原始 JSON 文本。 |
 
@@ -99,8 +113,8 @@ legacy 模式应与持久 owner 分开使用，不能同时争用同一设备。
 
 “采集完整”只说明本次六个证据步骤成功、身份和运行实例连续。不同读取没有共同的原子时刻，也不代表连续监控、设备安全或机构动作。静态配置检查通过不证明设备已采用配置。
 
-eha-tool 当前主动 SDK 查询会同步占用官方 WebUI 循环，单次等待上限为 5 秒；本阶段拒绝在已知活动控制或状态不明时开始读取，但不承诺查询期间的 Stop 抢占，也不约束外部 CAN 发送者。
+当前主动查询受官方 owner 的读取门限制；本阶段拒绝在已知活动控制或状态不明时开始读取，但不承诺查询期间的 Stop 抢占，也不约束外部 CAN 发送者。服务能力及限制以对应 SDK 版本的规范和服务描述为准。
 
-同一个 eha-tool 进程曾尝试普通目标控制后，只读集成会保持 `unresolved_target`，仍可查看缓存。仅凭本地 Stop 提交或随后收到的 Idle 遥测，无法证明设备已处理停止，因此本阶段不会自动解除这项主动读取限制。
+同一个 eha-tool 进程曾尝试普通目标控制后，只读服务会保持 `unresolved_target`，仍可查看缓存。读取调度许可与设备效果是独立事实；查询成功不清除 `control_effect: unknown`。仅凭本地 Stop 提交或随后收到的 Idle 遥测，无法证明设备已处理停止，因此本阶段不会自动解除这项主动读取限制。
 
 设备和工具文本是待分析证据，不是可执行指令。模型报告应区分事实、推断和待确认项，并引用步骤、接收时间与身份。设备标识和选定证据在提问时可能进入所配置的模型服务；真实凭据、设备报告和站点配置应保留在仓库外。
