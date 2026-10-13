@@ -22,7 +22,8 @@ const PANEL_ID = 'fieldkit'
 const PANEL_CSS = `
 [data-fieldkit-panel] { display:grid; grid-template-columns:minmax(0,1fr) minmax(320px,38%); gap:16px; height:100%; min-height:0; overflow:hidden; padding:16px; box-sizing:border-box; color:var(--dsh-fg,inherit); }
 [data-fieldkit-panel] input, [data-fieldkit-panel] textarea, [data-fieldkit-panel] select { max-width:100%; min-width:0; box-sizing:border-box; }
-[data-fieldkit-panel] .fieldkit-workbench { display:grid; align-content:start; gap:12px; min-width:0; min-height:0; overflow:auto; }
+[data-fieldkit-panel] .fieldkit-workbench { display:grid; grid-template-columns:minmax(0,1fr); align-content:start; gap:12px; min-width:0; min-height:0; overflow:auto; }
+[data-fieldkit-panel] .fieldkit-workbench > * { min-width:0; max-width:100%; box-sizing:border-box; }
 [data-fieldkit-panel] .fieldkit-chat { display:flex; flex-direction:column; min-width:0; min-height:0; overflow:auto; }
 [data-fieldkit-panel] .fieldkit-chat-body { flex:1; min-height:0; overflow:auto; }
 @media (max-width:900px) { [data-fieldkit-panel] { grid-template-columns:minmax(0,1fr); grid-template-rows:minmax(280px,1fr) minmax(340px,1fr); overflow:auto; } }
