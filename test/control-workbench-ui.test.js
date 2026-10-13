@@ -658,3 +658,18 @@ test('trial Stop successful metadata GET keeps canonical Stop receipt separate f
   assert.match(allText(ui), /操作 canonical-stop.*本地提交 locally_submitted/)
   assert.equal(fixed.trial.results[0].operationId === 'canonical-stop', false)
 })
+
+test('native recording error guidance uses structured action or phase in current and recovered evidence', async () => {
+  for (const [action, phase, guidance] of [['recording_start', 'submission', true], ['recording_stop', 'recording', true], ['trial_start', 'recording', true], ['position', 'submission', false]]) {
+    const fixed = scope(), failed = result(fixed, action)
+    failed.results[0] = { ...failed.results[0], phase, submission: 'not_submitted', controlEffect: 'not_attempted', error: { code: 'recording', message: 'Permission denied (os error 13)' } }
+    fixed.latest = failed
+    const current = mount(baseRemote(fixed)); await current.settle()
+    assert.equal(allText(current).includes('可用空间与写权限'), guidance, `current ${action}/${phase}`)
+    assert.match(allText(current), /Permission denied \(os error 13\)/)
+    const record = { recordId: 'native-recording', source: 'host', kind: 'control', action, instanceId: fixed.instanceId, members: fixed.members, operationIds: ['op'], result: failed, pending: false, recoveryError: null }
+    const history = mount(baseRemote(null, { listRecoveryHistory: async () => success({ records: [record] }) })); await history.settle()
+    assert.equal(allText(history).includes('可用空间与写权限'), guidance, `history ${action}/${phase}`)
+    assert.match(allText(history), /Permission denied \(os error 13\)/)
+  }
+})
