@@ -308,3 +308,21 @@ for (const transport of ['usb', 'can']) test(`editing ${transport} profile expan
   assert.match(ui.status(), /表单已清空；尚未创建或更新档案/)
   assert.equal(ui.button(`新建 ${kind} 档案`), undefined)
 })
+
+test('new disconnected connection cache invalidates an old connected target card and explicit refresh includes parent targets', async () => {
+  const identity = { uid: 'a'.repeat(24), runNonce: 'b'.repeat(32) }
+  let refreshed = 0, opened = 0
+  const target = { targetId: 'usb:serial', label: 'usb:serial', transport: 'usb', identity, connectionGeneration: '2', connected: true, canAttach: true, canConnect: false }
+  const remote = { listConnections: async () => success({ connections: [{ connectionId: target.targetId, targetId: target.targetId, identity, connectionGeneration: '3', connected: false, snapshotJsonText: '{}' }] }) }
+  const ui = mount(remote, { capabilities: ['connections'], targets: [target], openTarget: async () => opened++, refresh: async () => { refreshed++; Object.assign(target, { connected: false, connectionGeneration: '3', canAttach: false, canConnect: true }) } })
+  await new Promise(resolve => setImmediate(resolve)); ui.render()
+  const text = () => ui.nodes().flatMap(n => n.children.filter(v => typeof v === 'string')).join('\n')
+  assert.doesNotMatch(text(), /usb · 已连接/)
+  assert.match(text(), /目标列表待刷新/)
+  assert.equal(ui.button('先刷新目标列表').props.disabled, true)
+  assert.equal(ui.button('重新连接').props.disabled, false)
+  await ui.button('刷新连接与档案').props.onClick(); ui.render()
+  assert.equal(refreshed, 1); assert.equal(opened, 0)
+  assert.match(text(), /usb · 未连接/)
+  assert.equal(ui.button('请使用下方重新连接').props.disabled, true)
+})

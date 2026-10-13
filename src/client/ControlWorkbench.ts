@@ -63,13 +63,24 @@ export function ScopeStopBar({ fixedScope, status, onStop }: ScopeStopBarProps) 
     finally { if (active()) { live.current.pending = false; setState(previous => ({ ...previous, pending: false })) } }
   }
   const external = status?.scopeId === fixedScope?.scopeId && status?.action === 'stop' ? status : null
-  return React.createElement('section', { style: styles.card, 'aria-label': '常驻固定范围 Stop' }, React.createElement('h2', null, '固定范围普通 Stop'),
-    React.createElement('p', null, fixedScope ? `原始固定范围 ${fixedScope.scopeId}：${membersText(fixedScope)}。观察目标、切页和解除引用不会改变这些成员。` : '先明确建立控制范围；这里保留独立 Stop 入口。'),
-    fixedScope && React.createElement('details', null, React.createElement('summary', null, '核对完整原始成员'), fixedScope.members.map(member => React.createElement('p', { key: targetKey(member.target) }, `实例 ${member.target.instanceId} · ${member.target.targetId} · UID ${member.target.uid} · run_nonce ${member.target.runNonce} · 连接代次 ${member.target.connectionGeneration} · grant ${member.grantId}`))),
-    React.createElement('p', null, '普通 Stop 不是急停。不受普通读取、目标提交或模型 busy 阻挡；本地提交不证明机械停止。'),
-    reason && React.createElement('p', { role: 'status' }, reason),
-    React.createElement('button', { style: styles.button, disabled: !!reason || current.pending, onClick: stop }, '停止固定控制范围'),
-    current.notice && React.createElement('p', { role: 'status' }, current.notice), React.createElement(ResultEvidence, { result: external ?? current.result }))
+  const receipt = external ?? current.result
+  const summary = current.pending ? (receipt?.unknown ? '结果未知；正在请求。' : '正在请求。') : receipt?.unknown ? '结果未知。' : current.notice && !current.result ? '本次 Stop 回执未确认；不自动重发。' : receipt ? '回执已返回。' : reason ? 'Stop 暂不可用，原因见详情。' : '普通 Stop，非急停。'
+  const identity = fixedScope ? `${fixedScope.members.length} 台 · ${membersText(fixedScope)}` : '未建立固定范围'
+  return React.createElement('section', { style: { ...styles.card, position: 'sticky', top: 0, zIndex: 2, alignSelf: 'start', padding: 8, background: 'var(--dsh-bg, Canvas)' }, 'aria-label': '常驻固定范围 Stop' },
+    React.createElement('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', alignItems: 'center', gap: 8 } },
+      React.createElement('div', { style: { minWidth: 0 } },
+        React.createElement('h2', { style: { margin: 0, fontSize: 14 } }, '固定范围普通 Stop'),
+        React.createElement('p', { title: fixedScope ? `${fixedScope.scopeId}：${identity}` : identity, style: { margin: '4px 0 0', fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, identity)),
+      React.createElement('button', { style: { ...styles.button, minHeight: 44, maxWidth: '100%', fontSize: 14 }, disabled: !!reason || current.pending, onClick: stop }, '停止固定控制范围')),
+    React.createElement('p', { role: 'status', style: { margin: '6px 0', fontSize: 12 } }, `${summary}机械停止未确认。`),
+    React.createElement('details', { key, 'aria-label': '固定 Stop 原始范围与回执详情' },
+      React.createElement('summary', { style: { cursor: 'pointer', fontSize: 12 } }, '核对完整原始成员与回执'),
+      React.createElement('div', { style: { maxHeight: 'min(30vh, 160px)', overflow: 'auto', overflowWrap: 'anywhere' } },
+        React.createElement('p', null, fixedScope ? `原始固定范围 ${fixedScope.scopeId}：${membersText(fixedScope)}。观察目标、切页和解除引用不会改变这些成员。` : '先明确建立控制范围；这里保留独立 Stop 入口。'),
+        fixedScope?.members.map(member => React.createElement('p', { key: targetKey(member.target) }, `实例 ${member.target.instanceId} · binding ${member.target.bindingId} · ${member.target.targetId} · UID ${member.target.uid} · run_nonce ${member.target.runNonce} · 连接代次 ${member.target.connectionGeneration} · grant ${member.grantId} · control epoch ${member.controlEpoch} · Stop 编号 ${member.stopRequestId}`)),
+        React.createElement('p', null, '普通 Stop 不是急停。不受普通读取、目标提交或模型 busy 阻挡；本地提交不证明机械停止。'),
+        reason && React.createElement('p', null, reason), current.notice && React.createElement('p', null, current.notice),
+        React.createElement(ResultEvidence, { result: receipt }))))
 }
 
 const originalKey = (scope: FieldkitOriginalStopScope) => JSON.stringify([scope.referenceId, scope.instanceId, scope.targetId, scope.uid, scope.runNonce, scope.connectionGeneration, scope.controlEpoch, scope.stopRequestId])
@@ -337,7 +348,7 @@ export function ControlWorkbench({ remote, sessionId, currentBinding, busy, visi
       try {
         const receipt: FieldkitTrialReceipt = valueOf(await remote.getControlTrial(sessionId, trialId))
         if (receipt.trialId !== trialId || !sameMembers(receipt.members, fixed)) throw new Error('读取试验记录与原编号或成员不匹配。')
-        return receipt
+        return { ...receipt, results: result.results.map(member => ({ ...member, preparation: 'not_attempted' })), unknown: result.unknown, newSubmission: result.newSubmission, coalescedExisting: result.coalescedExisting }
       } catch (error) { progress.push(`试验记录只读查询失败：${errorText(error)}；以下保留已返回的 Stop 提交事实。`) }
     }
     return { members: fixed.members.map(member => member.target), trialId, mode: fixed.trial?.mode ?? 'position', state: result.unknown ? 'result_unknown' : 'stopping', progress, results: result.results.map(member => ({ ...member, preparation: 'not_attempted' })), unknown: result.unknown, stopAvailable: fixed.stopAvailable, recordingIds: fixed.trial?.recordingIds ?? [], newSubmission: result.newSubmission, coalescedExisting: result.coalescedExisting }

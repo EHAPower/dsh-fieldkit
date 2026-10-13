@@ -107,10 +107,18 @@ export function Connections({ remote, sessionId, capabilities, targets, busy, op
     React.createElement('h2', null, '连接与目标'), React.createElement('p', { role: 'status', 'aria-live': 'polite' }, notice),
     persistence && React.createElement('div', null, React.createElement('p', { role: persistence.state === 'failed' || persistence.state === 'unknown' ? 'alert' : undefined }, `${persistence.targetId} · UID 任务 ${persistence.jobId} · ${persistence.message}`),
       persistence.state !== 'completed' && button('查询 UID 持久任务', async () => followUidJob(persistence.targetId, persistence.jobId))),
-    targets.map((target: any) => React.createElement('div', { key: target.targetId, style: styles.row }, React.createElement('strong', null, target.label), React.createElement('span', null, `${target.transport} · ${target.connected ? '已连接' : '未连接'}`), React.createElement('button', { style: styles.button, disabled: busy || working || (!target.canAttach && !target.canConnect), onClick: () => openTarget(target) }, target.connected ? '选择并观察' : '连接并观察'),
-      target.transport === 'usb' && target.targetId.startsWith('usb:') && supports('usb_profiles') && React.createElement('button', { style: styles.button, disabled: busy || working, onClick: () => { setUsbDraft({ ...blankUsb(), serial: target.targetId.slice('usb:'.length), expectedUid: target.identity?.uid ?? null }); setUsbFormOpen(true) } }, '填写 USB 档案'))),
+    targets.map((target: any) => {
+      const cached = connections.find(value => value.targetId === target.targetId)
+      const stale = !!cached && (cached.connected !== target.connected || cached.connectionGeneration !== target.connectionGeneration || cached.identity?.uid !== target.identity?.uid || cached.identity?.runNonce !== target.identity?.runNonce)
+      const reconnectRequired = !!cached && !cached.connected
+      return React.createElement('div', { key: target.targetId, style: styles.row },
+        React.createElement('strong', null, target.label),
+        React.createElement('span', null, stale ? `${target.transport} · 连接缓存：${cached!.connected ? '已连接' : '已断开'}（代次 ${cached!.connectionGeneration}）；目标列表待刷新` : `${target.transport} · ${target.connected ? '已连接' : '未连接'}`),
+        React.createElement('button', { style: styles.button, disabled: busy || working || stale || reconnectRequired || (!target.canAttach && !target.canConnect), onClick: () => { if (!stale && !reconnectRequired) return openTarget(target) } }, stale ? '先刷新目标列表' : reconnectRequired ? '请使用下方重新连接' : target.connected ? '选择并观察' : '连接并观察'),
+        target.transport === 'usb' && target.targetId.startsWith('usb:') && supports('usb_profiles') && React.createElement('button', { style: styles.button, disabled: busy || working, onClick: () => { setUsbDraft({ ...blankUsb(), serial: target.targetId.slice('usb:'.length), expectedUid: target.identity?.uid ?? null }); setUsbFormOpen(true) } }, '填写 USB 档案'))
+    }),
     !supports('connections') ? React.createElement('p', null, '当前服务未发布 P2 connections 能力；USB 观察仍可用。') : React.createElement(React.Fragment, null,
-      button('刷新连接与档案', reload),
+      button('刷新连接与档案', changed),
       connections.map(c => React.createElement('div', { key: c.connectionId, style: { ...styles.card, marginTop: 8 } },
         React.createElement('strong', null, c.targetId), React.createElement('p', null, `${c.connected ? '已连接' : '已断开'} · UID ${c.identity?.uid ?? '未取得（仅可显式重连）'} · 代次 ${c.connectionGeneration} · 遥测年龄 ms ${text(c.telemetryReceivedAgeMs)}`),
         button(c.connected ? '断开此连接' : '重新连接', async () => { const result = valueOf(await remote.changeConnection(sessionId, { connectionId: c.connectionId, identity: c.identity, connectionGeneration: c.connectionGeneration, action: c.connected ? 'disconnect' : 'reconnect' })); return connected(result) }),

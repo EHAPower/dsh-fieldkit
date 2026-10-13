@@ -60,3 +60,29 @@ test('post-selection service authentication failure revokes authority for thrown
     assert.equal(c.state.description.available, false); assert.equal(c.state.description.instanceId, null)
   }
 })
+
+test('explicit service overview refresh reads only instance metadata and clears stale shutdown confirmation', async () => {
+  let reads = 0, confirmation = true
+  const c = context({ serviceStatus: async () => { reads++; return { value: { settings: {}, attached: true, instance: { instance_id: 'A', sessions: [{ heartbeat_active: true, recording_active: true }] } } } } })
+  c.setShutdownConfirmed = value => { confirmation = value }
+  const start = source.indexOf('  const refreshServiceStatus = async'), end = source.indexOf('\n  const manageService', start)
+  assert.ok(start >= 0)
+  vm.runInNewContext(ts.transpileModule(`${source.slice(start, end)}\nglobalThis.action=refreshServiceStatus`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, c)
+  await c.action()
+  assert.equal(reads, 1); assert.equal(confirmation, false)
+  assert.equal(c.state.status.instance.sessions[0].heartbeat_active, true)
+  c.remote.serviceStatus = async () => { throw new Error('sdk_timeout') }; c.state.description = { available: true, instanceId: 'A' }
+  await c.action(); assert.equal(c.state.description.available, false); assert.equal(c.state.description.instanceId, null)
+})
+
+test('service overview visibly names a received snapshot and exposes an explicit metadata refresh', () => {
+  const module = { exports: {} }, calls = []
+  const react = { createElement: (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity).filter(Boolean) }), useRef: value => ({ current: value }) }
+  const source = readFileSync(new URL('../src/client/ServiceSettings.ts', import.meta.url), 'utf8')
+  vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true } }).outputText, { module, exports: module.exports, require: name => name === 'react' ? react : { text: String, errorText: String, panelStyles: () => ({}) } })
+  const tree = module.exports.ServiceSettings({ serviceStatus: { instance: { service_state: 'running', tool_version: 'tool', instance_id: 'i', pid: '1', control_effect: { state: 'unknown' }, activity: {}, sessions: [] } }, serviceSettings: {}, busy: false, refreshServiceStatus: () => calls.push('metadata') })
+  const nodes = []; const visit = node => { if (!node || typeof node !== 'object') return; nodes.push(node); node.children?.forEach(visit) }; visit(tree)
+  assert.match(JSON.stringify(tree), /上次概要（非实时）/); assert.match(JSON.stringify(tree), /本页收到时刻/)
+  nodes.find(node => node.type === 'button' && node.children.includes('刷新服务概要')).props.onClick()
+  assert.deepEqual(calls, ['metadata'])
+})

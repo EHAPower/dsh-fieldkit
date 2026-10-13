@@ -186,6 +186,7 @@ test('reference release keeps SDK completed terminal usable but cannot bypass ac
   fill(ui)
   assert.equal(ui.button('预检并启动试验').props.disabled, false)
   assert.match(ui.visible(), /引用已释放.*不代表试验结束或设备停止/)
+  assert.match(ui.visible(), /已完成试验记录（引用已释放）/)
   ui.props.receipt = receipt([first], { referenceReleased: true, state: 'active', statusRead: 'available' }); ui.render(); fill(ui)
   assert.equal(ui.button('预检并启动试验').props.disabled, true)
   ui.props.receipt = receipt([first], { referenceReleased: true, state: 'completed', statusRead: 'unavailable' }); ui.render(); fill(ui)

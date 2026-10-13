@@ -283,3 +283,103 @@ test('post-POST receipt persistence failure preserves the actual result and dura
   const reopened = createRecoveryJournal({ directory }); assert.equal((await reopened.list('chat')).records[0].pending, true)
   assert.equal(x.calls.filter(c => c[0] === 'command').length, 1)
 })
+
+test('released positively completed trial keeps final evidence after SDK operation retention expires without requery or resubmission', async () => {
+  const x = setup(), scope = await x.scope(); let reads = 0, starts = 0
+  x.client.startTrial = async (b, intent) => { starts++; return x.receipt(b, intent, 'trial_start') }
+  x.client.trialStatus = async () => { reads++; return { trial: { state: 'completed', stopObserved: true, stopConfirmationOverdue: false, elapsedMs: '1000', nativeJsonText: 'FINAL_SDK_COMPLETED' } } }
+  x.client.recordingStatus = async () => ({ recordingId: 'rec', active: false, failed: false, nativeJsonText: '{}' })
+  const parameters = { mode: 'position', command: { positionMm: '1', velocityMmS: '', forceN: '', equilibriumMm: '', stiffnessNPerMm: '', dampingNsPerMm: '' }, envelope: { positionMinMm: '0', positionMaxMm: '10', velocityAbsMaxMmS: '1', forceAbsMaxN: '1', stiffnessMaxNPerMm: '1', dampingMaxNsPerMm: '1', durationMaxS: '1' }, durationS: '1', reach: null }
+  const start = await x.service.startControlTrial('chat', { scopeId: scope.scopeId, parameters })
+  const final = await x.service.getControlTrial('chat', start.trialId)
+  await x.service.releaseControlTrial('chat', start.trialId)
+  x.client.trialStatus = async () => { reads++; throw error('operation_not_found') }
+  const context = await x.service.controlContext('chat')
+  const retained = await x.service.getControlTrial('chat', start.trialId)
+  assert.equal(reads, 1); assert.equal(starts, 1)
+  assert.equal(retained.state, 'completed'); assert.equal(retained.statusRead, 'available'); assert.equal(retained.referenceReleased, true)
+  assert.deepEqual(retained.progress, final.progress); assert.equal(retained.results[0].trialNativeJsonText, 'FINAL_SDK_COMPLETED')
+  assert.equal(context.scopes[0].trial.statusRead, 'available')
+})
+
+test('releasing active or SDK-unknown trial references cannot freeze status polling as completed', async () => {
+  for (const unknown of [false, true]) {
+    const x = setup(), scope = await x.scope(); let reads = 0
+    x.client.startTrial = async (b, intent) => ({ ...x.receipt(b, intent, 'trial_start'), ...(unknown ? { submission: 'unknown', controlEffect: 'unresolved' } : {}) })
+    x.client.trialStatus = async () => { reads++; return { trial: { state: unknown ? 'completed' : 'active', stopObserved: false, stopConfirmationOverdue: false, elapsedMs: '1000', nativeJsonText: 'ORIGINAL_STATE' } } }
+    x.client.recordingStatus = async () => ({ recordingId: null, active: false, failed: false, nativeJsonText: '{}' })
+    const parameters = { mode: 'position', command: { positionMm: '1', velocityMmS: '', forceN: '', equilibriumMm: '', stiffnessNPerMm: '', dampingNsPerMm: '' }, envelope: { positionMinMm: '0', positionMaxMm: '10', velocityAbsMaxMmS: '1', forceAbsMaxN: '1', stiffnessMaxNPerMm: '1', dampingMaxNsPerMm: '1', durationMaxS: '1' }, durationS: '1', reach: null }
+    const start = await x.service.startControlTrial('chat', { scopeId: scope.scopeId, parameters })
+    await x.service.getControlTrial('chat', start.trialId); await x.service.releaseControlTrial('chat', start.trialId)
+    x.client.trialStatus = async () => { reads++; throw error('operation_not_found') }
+    const result = await x.service.getControlTrial('chat', start.trialId)
+    assert.equal(reads, 2); assert.equal(result.statusRead, 'unavailable'); assert.equal(result.unknown, unknown)
+    assert.match(result.progress.join(' '), /operation_not_found/)
+  }
+})
+
+test('known Stop cannot freeze or replace an original SDK-unknown trial mutation after completed observation and release', async () => {
+  for (const source of ['sdk', 'transport']) {
+  const x = setup(), scope = await x.scope(); let reads = 0
+  x.client.startTrial = async (b, intent) => { if (source === 'transport') throw error('sdk_timeout'); return { ...x.receipt(b, intent, 'trial_start'), submission: 'unknown', controlEffect: 'unresolved' } }
+  x.client.trialStatus = async () => { reads++; return { trial: { state: 'completed', stopObserved: true, stopConfirmationOverdue: false, elapsedMs: '1000', nativeJsonText: 'OBSERVATION_ONLY' } } }
+  x.client.recordingStatus = async () => ({ recordingId: null, active: false, failed: false, nativeJsonText: '{}' })
+  const parameters = { mode: 'position', command: { positionMm: '1', velocityMmS: '', forceN: '', equilibriumMm: '', stiffnessNPerMm: '', dampingNsPerMm: '' }, envelope: { positionMinMm: '0', positionMaxMm: '10', velocityAbsMaxMmS: '1', forceAbsMaxN: '1', stiffnessMaxNPerMm: '1', dampingMaxNsPerMm: '1', durationMaxS: '1' }, durationS: '1', reach: null }
+  const start = await x.service.startControlTrial('chat', { scopeId: scope.scopeId, parameters })
+  await x.service.getControlTrial('chat', start.trialId); await x.service.stopControlScope('chat', scope.scopeId)
+  await x.service.getControlTrial('chat', start.trialId); await x.service.releaseControlTrial('chat', start.trialId)
+  const before = reads; x.client.trialStatus = async () => { reads++; throw error('operation_not_found') }
+  const result = await x.service.getControlTrial('chat', start.trialId)
+  assert.equal(reads, before + 1); assert.equal(result.statusRead, 'unavailable'); assert.equal(result.unknown, true)
+  assert.equal(result.action, 'trial_start'); assert.equal(result.results[0].operationId, 'op1')
+  assert.equal(result.results[0].submission, 'unknown'); assert.equal(result.results[0].unknownSource, source)
+  if (source === 'transport') {
+    x.client.controlOperation = async (_instance, id) => ({ ...x.receipt(x.bindings[0], { operationId: id, claimantId: 'chat' }, 'position'), submission: 'not_submitted', controlEffect: 'not_attempted' })
+    assert.equal((await x.service.getControlTrial('chat', start.trialId)).unknown, true)
+    x.client.controlOperation = async (_instance, id) => { assert.equal(id, 'op1'); return { ...x.receipt(x.bindings[0], { operationId: id, claimantId: 'chat' }, 'trial_start'), submission: 'not_submitted', controlEffect: 'not_attempted' } }
+    const proof = await x.service.getControlTrial('chat', start.trialId)
+    assert.equal(proof.unknown, false); assert.equal(proof.statusRead, 'unavailable')
+    assert.equal(proof.action, 'trial_start'); assert.equal(proof.results[0].operationId, 'op1')
+    assert.equal(proof.results[0].submission, 'not_submitted'); assert.equal(proof.results[0].controlEffect, 'not_attempted')
+    const again = await x.service.getControlTrial('chat', start.trialId)
+    assert.equal(again.action, 'trial_start'); assert.equal(again.results[0].operationId, 'op1'); assert.equal(again.results[0].submission, 'not_submitted')
+  }
+  }
+})
+
+test('released scope revoke temporarily attaches only the exact original member and preserves maintenance CAS', async () => {
+  const x = setup(), scope = await x.scope()
+  await x.service.releaseControlScope('chat', scope.scopeId)
+  const original = scope.members[0], detached = new Set(['b0'])
+  x.client.permissionView = async b => {
+    if (detached.has(b.binding_id)) throw error('not_found')
+    return { maintenance: true, control: true, grantId: original.grantId, controlEpoch: original.controlEpoch, stopRequestId: original.stopRequestId }
+  }
+  const result = await x.service.revokeControlScope('chat', scope.scopeId)
+  assert.equal(result.controlGranted, false)
+  assert.equal(result.state, 'released'); assert.equal(result.controlReady, false)
+  assert.equal(result.members[0].target.bindingId, original.target.bindingId)
+  const binds = x.calls.filter(c => c[0] === 'bind')
+  assert.equal(binds.length, 2)
+  assert.deepEqual(binds[1][1], { instance_id: 'i', target_id: 'usb', intent: 'attach', expected_identity: { uid: 'u0', run_nonce: 'n' }, connection_generation: '1', lease_ms: 120000 })
+  assert.deepEqual(x.calls.filter(c => c[0] === 'permission').at(-1), ['permission', { maintenance: true, control: false }, 'g'])
+  assert.equal(x.calls.filter(c => c[0] === 'detach').length, 2)
+  assert.equal(x.calls.some(c => ['command', 'stop', 'original'].includes(c[0])), false)
+})
+
+test('released scope revoke refuses changed identity grant epoch or canonical Stop and detaches temporary observers', async () => {
+  for (const fault of ['identity', 'grant', 'epoch', 'stop', 'disposed']) {
+    const x = setup(), scope = await x.scope(); await x.service.releaseControlScope('chat', scope.scopeId)
+    const bind = x.client.bind
+    x.client.bind = async request => { const b = await bind(request); return fault === 'identity' ? { ...b, identity: { ...b.identity, uid: 'other' } } : b }
+    x.client.permissionView = async () => {
+      if (fault === 'disposed') await x.service.disposeControlScopes()
+      return { maintenance: true, control: true, grantId: fault === 'grant' ? 'new-grant' : 'g', controlEpoch: fault === 'epoch' ? '2' : '1', stopRequestId: fault === 'stop' ? 'other-stop' : 'stop-b0' }
+    }
+    const result = await x.service.revokeControlScope('chat', scope.scopeId)
+    assert.equal(result.controlGranted, true, fault)
+    assert.match(result.reason, /授权撤销未确认/)
+    assert.equal(x.calls.filter(c => c[0] === 'permission').length, 1, fault)
+    assert.equal(x.calls.filter(c => c[0] === 'detach').length, 2, fault)
+  }
+})

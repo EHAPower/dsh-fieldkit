@@ -290,8 +290,25 @@ export function createP4Service({ mode, session, attach, http, currentInstance =
       const notes = []; let revoked = 0
       try {
         for (const m of scope.members) {
-          try { const current = await scope.client.permissionView(m.binding); requireActive(); await scope.client.controlPermission(m.binding, { maintenance: current.maintenance, control: false }, current.grantId); revoked++; notes.push(`${m.binding.target_id} control 授权已撤销`) }
+          let temporary = null
+          try {
+            requireActive()
+            if (scope.observerReleased) {
+              const d = await ready(s, 'control')
+              if (d.instance_id !== scope.instanceId) fail('instance_mismatch', '原范围属于旧服务实例；不撤销新实例授权。')
+              temporary = await scope.client.bind({ instance_id: scope.instanceId, target_id: m.binding.target_id, intent: 'attach', expected_identity: { ...m.binding.identity }, connection_generation: m.binding.connection_generation, lease_ms: 120000 })
+              requireActive()
+              if (temporary.instance_id !== scope.instanceId || temporary.target_id !== m.binding.target_id || !sameIdentity(temporary.identity, m.binding.identity) || temporary.connection_generation !== m.binding.connection_generation) fail('identity_changed', '临时观察不属于原完整成员；未撤销授权。')
+            }
+            const binding = temporary ?? m.binding
+            const current = await scope.client.permissionView(binding)
+            requireActive()
+            if (temporary && (current.control !== true || current.grantId !== m.grantId || current.controlEpoch !== m.controlEpoch || current.stopRequestId !== m.stopRequestId)) fail('permission_conflict', '原成员的授权或控制代次已变化；请重新人工核对，未覆盖新授权。')
+            await scope.client.controlPermission(binding, { maintenance: current.maintenance, control: false }, current.grantId)
+            revoked++; notes.push(`${m.binding.target_id} control 授权已撤销`)
+          }
           catch (e) { notes.push(`${m.binding.target_id} 授权撤销未确认：${e.code ?? 'backend_error'} ${e.message}`) }
+          finally { if (temporary) try { await scope.client.detach(temporary) } catch (e) { notes.push(`${m.binding.target_id} 临时观察解除未确认：${e.code ?? 'backend_error'} ${e.message}；等待租约回收`) } }
         }
         scope.reason = `${notes.join('；')}。没有请求 Stop 或断连，旧普通范围不会恢复。`
         if (revoked === scope.members.length) { scope.controlGranted = false; scope.stopAvailable = false; scope.stopReason = '此范围 control 授权已撤销；Stop 需要重新明确人工授权原范围。' }
@@ -309,21 +326,24 @@ export function createP4Service({ mode, session, attach, http, currentInstance =
       const scope = registered(s, request.scopeId), trialId = randomUUID()
       const record = { id: trialId, sessionId: s, scopeId: scope.id, mode: request.parameters.mode, memberIds: [], latest: null }
       const run = await ordinary(s, scope.id, 'trial_start', 'trials', () => ({ trial: input }))
-      record.memberIds = run.results.map(r => r.operationId); record.latest = run; trials.set(trialId, record)
+      record.memberIds = run.results.map(r => r.operationId); record.latest = run; pinTrialUnknown(record, run); trials.set(trialId, record)
       return trialView(scope, record)
     },
     async updateControlTrial(s, request) {
       fields(request, ['trialId', 'positionRaw']); if (!decimal(request.positionRaw)) fail('bad_request', '位置需原始 JSON 数值文字。')
       const record = trials.get(request.trialId); if (!record || record.sessionId !== s || record.memberIds.some(id => !id)) fail('not_found', '没有当前对话登记的原始完整试验。')
-      const run = await ordinary(s, record.scopeId, 'trial_target', 'trials/target', (_m, i) => ({ trialId: record.memberIds[i], mm: request.positionRaw })); record.latest = run
+      const run = await ordinary(s, record.scopeId, 'trial_target', 'trials/target', (_m, i) => ({ trialId: record.memberIds[i], mm: request.positionRaw })); record.latest = run; pinTrialUnknown(record, run)
       return trialView(registered(s, record.scopeId), record)
     },
     async releaseControlTrial(s, trialId) { const record = trials.get(trialId); if (!record || record.sessionId !== s) fail('not_found', '当前对话未登记原试验。'); record.released = true; return trialView(registered(s, record.scopeId), record) },
     async getControlTrial(s, trialId) {
       const record = trials.get(trialId); if (!record || record.sessionId !== s) fail('not_found', '当前对话未登记原试验。')
       const scope = await scopeReady(s, record.scopeId, 'trials', true), statuses = [], recordingIds = [], states = [], evidence = [...(record.evidence ?? [])]
+      if (completedReference(scope, record)) return trialView(scope, record)
       await refreshScope(scope)
       if (scope.latest?.results.every((r, i) => r.operationId === record.latest?.results[i]?.operationId)) record.latest = scope.latest
+      pinTrialUnknown(record, record.latest)
+      await refreshTrialUnknown(scope, record, statuses)
       for (let i = 0; i < scope.members.length; i++) {
         const id = record.memberIds[i]
         if (!id) { statuses.push('not_admitted'); continue }
@@ -334,13 +354,38 @@ export function createP4Service({ mode, session, attach, http, currentInstance =
       if (record.statusRead === 'available') record.states = states
       record.evidence = evidence
       record.statuses = statuses; record.recordingIds = recordingIds
-      if (scope.latest?.action === 'stop') record.latest = scope.latest
       return trialView(scope, record, statuses, recordingIds)
     },
     async disposeControlScopes() { disposed = true; for (const scope of scopes.values()) { await expireScope(scope, '插件已解除观察引用，不代表设备停止。') } },
   }
+  function pinTrialUnknown(record, run) {
+    if (!record.pinnedUnknown && run?.results.some(result => result.previousUnknown || result.unknown || result.submission === 'unknown' || result.controlEffect === 'unresolved')) record.pinnedUnknown = structuredClone(run)
+  }
+  async function refreshTrialUnknown(scope, record, statuses) {
+    const original = record.pinnedUnknown
+    if (!original) return
+    const results = []
+    for (let i = 0; i < original.results.length; i++) {
+      const previous = original.results[i]
+      if (previous.unknownSource !== 'transport' || previous.previousUnknown || !previous.operationId) { results.push(previous); continue }
+      try {
+        const operation = await scope.client.controlOperation(scope.instanceId, previous.operationId)
+        if (operation.operationId !== previous.operationId || operation.action !== original.action) fail('invalid_response', '试验原操作编号或动作变化。')
+        const next = project(scope, scope.members[i], operation)
+        results.push(next.unknown || next.admission === 'finished' && next.submission === 'not_submitted' && next.controlEffect === 'not_attempted' ? next : previous)
+      } catch (error) { results.push(previous); statuses.push(`原试验操作核对：${err(error).code}: ${error.message}`) }
+    }
+    if (record.pinnedUnknown !== original) return
+    const value = { ...original, results, unknown: results.some(result => result.unknown || result.previousUnknown), newSubmission: false }
+    if (value.unknown) record.pinnedUnknown = value
+    else { record.pinnedUnknown = null; record.latest = value }
+  }
+  function completedReference(scope, record) {
+    // Stop polling only a human-released reference with positive complete SDK evidence for every original member.
+    return !record.pinnedUnknown && record.released === true && record.statusRead === 'available' && record.states?.length === scope.members.length && record.states.every(state => state === 'completed') && record.latest?.unknown === false && record.latest.results.length === scope.members.length && record.latest.results.every(result => !result.unknown && !result.previousUnknown && result.submission !== 'unknown' && result.controlEffect !== 'unresolved')
+  }
   function trialView(scope, record, statuses = record.statuses ?? [], recordingIds = record.recordingIds ?? []) {
-    const run = record.latest ?? scope.latest
+    const run = record.pinnedUnknown ?? record.latest ?? scope.latest
     const value = { statusRead: record.statusRead ?? 'not_read', statusReason: record.statusRead === 'unavailable' ? '最近试验状态读取未完成；显示最后已知状态，原错误见进度。' : null, trialId: record.id, action: run.action, members: scope.members.map(m => target(scope.instanceId, m.binding)), mode: record.mode, referenceReleased: record.released === true, state: record.states?.length ? [...new Set(record.states)].join(' / ') : run.results.map(r => r.admission).join(' / '), progress: statuses.length ? statuses : run.results.map(r => r.phase ?? r.admission), results: run.results.map((r, i) => ({ ...record.evidence?.[i], target: r.target, preparation: r.phase ?? r.admission, admission: r.admission, submission: r.submission, observation: r.observation, unknown: r.unknown, nativeJsonText: r.nativeJsonText, operationId: r.operationId, unknownSource: r.unknownSource, controlEffect: r.controlEffect })), unknown: run.unknown, stopAvailable: scope.stopAvailable, recordingIds, ...(typeof run.newSubmission === 'boolean' ? { newSubmission: run.newSubmission } : {}), ...(run.coalescedExisting ? { coalescedExisting: true } : {}) }
     scope.trial = value; return structuredClone(value)
   }

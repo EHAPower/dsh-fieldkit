@@ -647,3 +647,14 @@ test('late original-scope list from an old instance cannot replace newly read cu
   assert.equal(ui.button('请求所选原执行范围 Stop').props.disabled, false)
   assert.match(allText(ui), /实例 new-instance.*当前范围 是/)
 })
+
+
+test('trial Stop successful metadata GET keeps canonical Stop receipt separate from original trial operation proof', async () => {
+  const fixed = scope(); fixed.trial = trialReceipt([first])
+  const stopped = result(fixed, 'stop'); stopped.results[0].operationId = 'canonical-stop'
+  const original = { ...fixed.trial, results: [{ ...fixed.trial.results[0], operationId: 'original-trial', submission: 'not_submitted', controlEffect: 'not_attempted' }] }
+  const ui = mount(baseRemote(fixed, { stopControlScope: async () => success(stopped), getControlTrial: async () => success(original) })); await ui.settle()
+  await ui.button('显式停止原试验').props.onClick(); ui.render()
+  assert.match(allText(ui), /操作 canonical-stop.*本地提交 locally_submitted/)
+  assert.equal(fixed.trial.results[0].operationId === 'canonical-stop', false)
+})

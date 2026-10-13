@@ -197,6 +197,23 @@ function FieldkitPanel(props: any) {
     void poll(); return () => { active = false; clearTimeout(timer) }
   }, [visible, sessionId, remote])
 
+  const refreshServiceStatus = async () => {
+    if (!begin()) return
+    const ticket = invalidate()
+    setShutdownConfirmed(false)
+    try {
+      const status = valueOf(await remote.serviceStatus())
+      if (!current(ticket)) return
+      setServiceStatus(status)
+      setNotice(status.error ? `服务概要读取失败：${errorText(status.error)}` : '服务概要已刷新；这是本次读取到的服务元数据。')
+    } catch (error) {
+      if (current(ticket)) {
+        setDescribe((previous: any) => previous ? { ...previous, available: false, instanceId: null } : null)
+        setNotice(`服务概要读取失败：${errorText(error)}；保留上次概要。`)
+      }
+    } finally { end() }
+  }
+
   const manageService = async (action: 'save' | 'attach' | 'start' | 'shutdown') => {
     if (!serviceSettings || !begin()) return
     const ticket = invalidate()
@@ -354,7 +371,7 @@ function FieldkitPanel(props: any) {
         legacy && React.createElement('p', null, 'Legacy CLI 是六次离散命令采集，不是持续 owner 会话或同一时刻快照；不会自动回退。'),
         discovery.limited && React.createElement('p', { role: 'alert' }, `目标发现不完整：${text(discovery.reason)}`),
       ),
-      (describe?.mode === 'service-v2' || serviceSettings !== null) && React.createElement(ServiceSettings, { serviceSettings, serviceStatus, setServiceSettings, shutdownConfirmed, setShutdownConfirmed, busy, manageService }),
+      (describe?.mode === 'service-v2' || serviceSettings !== null) && React.createElement(ServiceSettings, { serviceSettings, serviceStatus, setServiceSettings, shutdownConfirmed, setShutdownConfirmed, busy, manageService, refreshServiceStatus }),
       React.createElement('nav', { 'aria-label': 'Fieldkit 工作区', style: styles.row }, [['connections', '连接'], ['observe', '观察与诊断'], ['records', '记录 / ODrive'], ['configuration', '配置 / 维护'], ['control', '控制 / 试验']].map(([key, label]) => React.createElement('button', { key, 'aria-pressed': tab === key, onClick: () => setTab(key), style: styles.button }, label))),
       sessionId && React.createElement('div', { style: { display: tab === 'control' ? 'block' : 'none' } }, React.createElement(ControlWorkbench, { remote, sessionId, currentBinding: binding, busy, visible, onContextChange: (value: FieldkitControlContext) => setControlState({ sessionId, value }) })),
       tab === 'connections' && React.createElement(Connections, { remote, sessionId, capabilities: describe?.capabilities, instanceId: describe?.instanceId, targets, busy, openTarget, refresh }),
