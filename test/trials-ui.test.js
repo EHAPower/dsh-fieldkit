@@ -157,7 +157,39 @@ test('a correlated start receipt retires only its pending placeholder and keeps 
   ui.props.receipt = { ...original }; ui.render()
   assert.doesNotMatch(ui.visible(), /启动等待|已请求预检，等待服务事实/)
   assert.equal(ui.button('按原设备范围请求停止（试验结果未知）'), undefined)
-  assert.match(ui.visible(), /启动试验 · 试验 trial-1 · finished/)
+  assert.match(ui.visible(), /启动试验（原动作回执，非当前试验状态） · 试验 trial-1 · 已登记状态 finished/)
+  ui.props.receipt = receipt([first], { state: 'completed', statusRead: 'available' }); ui.render()
+  assert.match(ui.visible(), /服务最近读取的试验/)
   assert.match(ui.visible(), /preflight completed/); assert.match(ui.visible(), /local_submit/)
   assert.ok(ui.button('显式停止原试验'))
+})
+
+
+test('trial display distinguishes last-known read failures and expired historical state without inventing completion', () => {
+  const ui = mount(fixture({ receipt: receipt([first], { statusRead: 'unavailable', statusReason: '最近读取失败', progress: ['operation_not_found: ORIGINAL_ERROR'] }) }))
+  assert.match(ui.visible(), /最后已知状态 active/)
+  assert.doesNotMatch(ui.visible(), /服务当前试验/)
+  assert.match(ui.visible(), /operation_not_found: ORIGINAL_ERROR/)
+  ui.props.historyReason = '原范围属于旧服务实例'
+  ui.props.stopGateReason = '原范围过期'
+  ui.render()
+  assert.match(ui.visible(), /历史试验/); assert.match(ui.visible(), /原范围属于旧服务实例/)
+  assert.equal(ui.button('显式停止原试验').props.disabled, true)
+  ui.props.historyReason = null; ui.props.stopGateReason = null
+  ui.props.receipt = receipt([first], { state: 'completed', statusRead: 'available' }); ui.render()
+  assert.match(ui.visible(), /服务最近读取的试验/); assert.match(ui.visible(), /completed/)
+})
+
+
+test('reference release keeps SDK completed terminal usable but cannot bypass active or unknown trial gates', () => {
+  const ui = mount(fixture({ receipt: receipt([first], { referenceReleased: true, state: 'completed', statusRead: 'available' }) }))
+  fill(ui)
+  assert.equal(ui.button('预检并启动试验').props.disabled, false)
+  assert.match(ui.visible(), /引用已释放.*不代表试验结束或设备停止/)
+  ui.props.receipt = receipt([first], { referenceReleased: true, state: 'active', statusRead: 'available' }); ui.render(); fill(ui)
+  assert.equal(ui.button('预检并启动试验').props.disabled, true)
+  ui.props.receipt = receipt([first], { referenceReleased: true, state: 'completed', statusRead: 'unavailable' }); ui.render(); fill(ui)
+  assert.equal(ui.button('预检并启动试验').props.disabled, true)
+  ui.props.receipt = receipt([first], { referenceReleased: true, state: 'completed', statusRead: 'available', unknown: true }); ui.render(); fill(ui)
+  assert.equal(ui.button('预检并启动试验').props.disabled, true)
 })

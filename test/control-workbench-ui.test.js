@@ -155,10 +155,10 @@ test('trial Stop retains canonical member submission facts if later trial GET fa
 
 test('releasing trial reference does not release the control scope or send Stop', async () => {
   const fixed = scope(); fixed.trial = trialReceipt([first]); let releases = 0, scopeReleases = 0, stops = 0
-  const ui = mount(baseRemote(fixed, { releaseControlTrial: async (_, id) => { releases++; assert.equal(id, 'registered-trial'); fixed.trial = { ...fixed.trial, state: 'reference_released' }; return success(fixed.trial) }, releaseControlScope: async () => { scopeReleases++ }, stopControlScope: async () => { stops++ } })); await ui.settle()
+  const ui = mount(baseRemote(fixed, { releaseControlTrial: async (_, id) => { releases++; assert.equal(id, 'registered-trial'); fixed.trial = { ...fixed.trial, referenceReleased: true }; return success(fixed.trial) }, releaseControlScope: async () => { scopeReleases++ }, stopControlScope: async () => { stops++ } })); await ui.settle()
   await ui.button('释放原试验引用（不 Stop）').props.onClick(); ui.render()
   assert.equal(releases, 1); assert.equal(scopeReleases, 0); assert.equal(stops, 0)
-  assert.match(allText(ui), /reference_released/)
+  assert.match(allText(ui), /原试验引用已释放/)
   assert.equal(ui.button('请求普通 Stop').props.disabled, false)
 })
 

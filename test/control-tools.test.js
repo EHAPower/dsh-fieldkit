@@ -90,3 +90,12 @@ test('official defineTool converts fixed oneOf branches and nested required fiel
   const incomplete = { ...parameters.command }; delete incomplete.positionMm
   for (const changed of [{ ...parameters, command: incomplete }, { ...parameters, reach: {} }, { ...parameters, durationS: 1 }]) assert.ok(validateJsonSchemaValue(trialSchema, { scopeId: 'scope', parameters: changed }).length > 0)
 })
+
+test('trial model projection distinguishes unavailable state reads and released references from SDK state', async () => {
+  const value = { ...trial, statusRead: 'unavailable', statusReason: 'original status read failed', referenceReleased: true }
+  const { tools } = fixture({ getControlTrial: async () => value })
+  const projected = await tools[4].execute({ trialId: 'trial' }, exec)
+  assert.equal(projected.state, 'active'); assert.equal(projected.statusRead, 'unavailable')
+  assert.equal(projected.statusReason, value.statusReason); assert.equal(projected.referenceReleased, true)
+  assert.equal(projected.unknown, true)
+})

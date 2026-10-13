@@ -44,7 +44,7 @@ const error = { code: 128, message: 512 }
 const member = { target, operationId: 256, admission: 64, submission: 64, controlEffect: 64, observation: 64, phase: 64, unknown: true, unknownSource: 32, nativeJsonText: 'native', error, stopAttemptDelayMs: 64, trialId: 256, recordingId: 256, previousOperationId: 256, previousSubmission: 64, previousUnknown: true, previousNativeJsonText: 'native' }
 const result = { scopeId: 256, action: 64, results: [member], unknown: true, newSubmission: true, coalescedExisting: true }
 const trialResult = { ...member, preparation: 64, trialState: 64, stopObserved: true, stopConfirmationOverdue: true, elapsedMs: 64, trialNativeJsonText: 'native' }
-const trialReceipt = { trialId: 256, members: [target], mode: 32, state: 64, progress: [256], results: [trialResult], unknown: true, stopAvailable: true, recordingIds: [256], newSubmission: true, coalescedExisting: true }
+const trialReceipt = { statusRead: 32, statusReason: 256, referenceReleased: true, trialId: 256, members: [target], mode: 32, state: 64, progress: [256], results: [trialResult], unknown: true, stopAvailable: true, recordingIds: [256], newSubmission: true, coalescedExisting: true }
 const scope = { scopeId: 256, instanceId: 256, members: [{ target, grantId: 256 }], kind: 32, state: 32, controlGranted: true, controlReady: true, reason: 256, stopAvailable: true, stopReason: 256, latest: result, lastOrdinary: result, trial: trialReceipt, recordings: [{ target, active: true, failed: true, recordingId: 256, nativeJsonText: 'native', error }] }
 const context = { scopes: [scope], activeScopeId: 256, capabilities: [128] }
 function prefix(bytes, end) {

@@ -29,7 +29,7 @@ export function createP4Service({ mode, session, attach, http, currentInstance =
   function context(s) { session(s); if (!contexts.has(s)) contexts.set(s, { candidates: new Map(), scopes: [], activeScopeId: null }); return contexts.get(s) }
   async function ready(s, capability) { context(s); if (disposed) fail('disposed', '控制引用已释放。'); if (mode !== 'service-v2') fail('unsupported', '控制需要 service-v2。'); const d = await attach(); requireActive(); if (capability && !d.capabilities.includes(capability)) fail('unsupported', `服务未发布 ${capability}；不执行设备动作。`); return d }
   function registered(s, id) { const value = scopes.get(id); if (!value || value.sessionId !== s) fail('not_found', '当前对话未登记该固定控制范围。'); return value }
-  function view(value) { return structuredClone({ scopeId: value.id, instanceId: value.instanceId, members: value.members.map(m => ({ target: target(value.instanceId, m.binding), grantId: m.grantId, controlEpoch: m.controlEpoch, stopRequestId: m.stopRequestId })), kind: value.members.length === 1 ? 'single' : 'group', state: value.state, controlReady: value.controlReady, controlGranted: value.controlGranted !== false, reason: value.reason, stopAvailable: value.stopAvailable, stopReason: value.stopReason, latest: value.latest, lastOrdinary: value.lastOrdinary ?? null, trial: value.trial, recordings: value.recordings }) }
+  function view(value) { return structuredClone({ scopeId: value.id, instanceId: value.instanceId, members: value.members.map(m => ({ target: target(value.instanceId, m.binding), grantId: m.grantId, controlEpoch: m.controlEpoch, stopRequestId: m.stopRequestId })), kind: value.members.length === 1 ? 'single' : 'group', state: value.state, controlReady: value.controlReady, controlGranted: value.controlGranted !== false, reason: value.reason, stopAvailable: value.stopAvailable, stopReason: value.stopReason, latest: value.latest, lastOrdinary: value.lastOrdinary ?? null, trial: value.trial && value.state === 'expired' ? { ...value.trial, statusRead: 'historical', statusReason: value.reason, stopAvailable: false } : value.trial, recordings: value.recordings }) }
   function renew(scope, delay = 30000) {
     if (disposed || scope.observerReleased || scope.state === 'expired') return
     scope.timer = schedule(async () => {
@@ -321,7 +321,7 @@ export function createP4Service({ mode, session, attach, http, currentInstance =
     async releaseControlTrial(s, trialId) { const record = trials.get(trialId); if (!record || record.sessionId !== s) fail('not_found', '当前对话未登记原试验。'); record.released = true; return trialView(registered(s, record.scopeId), record) },
     async getControlTrial(s, trialId) {
       const record = trials.get(trialId); if (!record || record.sessionId !== s) fail('not_found', '当前对话未登记原试验。')
-      const scope = await scopeReady(s, record.scopeId, 'trials', true), statuses = [], recordingIds = [], states = [], evidence = []
+      const scope = await scopeReady(s, record.scopeId, 'trials', true), statuses = [], recordingIds = [], states = [], evidence = [...(record.evidence ?? [])]
       await refreshScope(scope)
       if (scope.latest?.results.every((r, i) => r.operationId === record.latest?.results[i]?.operationId)) record.latest = scope.latest
       for (let i = 0; i < scope.members.length; i++) {
@@ -330,16 +330,18 @@ export function createP4Service({ mode, session, attach, http, currentInstance =
         try { const v = await scope.client.trialStatus(scope.members[i].binding, id); states.push(v.trial.state); evidence[i] = { trialState: v.trial.state, stopObserved: v.trial.stopObserved, stopConfirmationOverdue: v.trial.stopConfirmationOverdue, elapsedMs: v.trial.elapsedMs, trialNativeJsonText: v.trial.nativeJsonText }; statuses.push(`${v.trial.state} · Stop观测 ${v.trial.stopObserved ? '是' : '否'} · 确认超时 ${v.trial.stopConfirmationOverdue ? '是' : '否'} · elapsed_ms ${v.trial.elapsedMs ?? '无'}`); const recording = await scope.client.recordingStatus(scope.members[i].binding); if (recording.recordingId) recordingIds.push(recording.recordingId) }
         catch (e) { statuses.push(`${err(e).code}: ${e.message}`) }
       }
-      if (states.length === scope.members.length) record.states = states
+      record.statusRead = states.length === scope.members.length ? 'available' : 'unavailable'
+      if (record.statusRead === 'available') record.states = states
       record.evidence = evidence
+      record.statuses = statuses; record.recordingIds = recordingIds
       if (scope.latest?.action === 'stop') record.latest = scope.latest
       return trialView(scope, record, statuses, recordingIds)
     },
     async disposeControlScopes() { disposed = true; for (const scope of scopes.values()) { await expireScope(scope, '插件已解除观察引用，不代表设备停止。') } },
   }
-  function trialView(scope, record, statuses = [], recordingIds = []) {
+  function trialView(scope, record, statuses = record.statuses ?? [], recordingIds = record.recordingIds ?? []) {
     const run = record.latest ?? scope.latest
-    const value = { trialId: record.id, action: run.action, members: scope.members.map(m => target(scope.instanceId, m.binding)), mode: record.mode, state: record.released ? 'reference_released' : record.states?.length ? [...new Set(record.states)].join(' / ') : run.results.map(r => r.admission).join(' / '), progress: statuses.length ? statuses : run.results.map(r => r.phase ?? r.admission), results: run.results.map((r, i) => ({ ...record.evidence?.[i], target: r.target, preparation: r.phase ?? r.admission, admission: r.admission, submission: r.submission, observation: r.observation, unknown: r.unknown, nativeJsonText: r.nativeJsonText, operationId: r.operationId, unknownSource: r.unknownSource, controlEffect: r.controlEffect })), unknown: run.unknown, stopAvailable: scope.stopAvailable, recordingIds, ...(typeof run.newSubmission === 'boolean' ? { newSubmission: run.newSubmission } : {}), ...(run.coalescedExisting ? { coalescedExisting: true } : {}) }
+    const value = { statusRead: record.statusRead ?? 'not_read', statusReason: record.statusRead === 'unavailable' ? '最近试验状态读取未完成；显示最后已知状态，原错误见进度。' : null, trialId: record.id, action: run.action, members: scope.members.map(m => target(scope.instanceId, m.binding)), mode: record.mode, referenceReleased: record.released === true, state: record.states?.length ? [...new Set(record.states)].join(' / ') : run.results.map(r => r.admission).join(' / '), progress: statuses.length ? statuses : run.results.map(r => r.phase ?? r.admission), results: run.results.map((r, i) => ({ ...record.evidence?.[i], target: r.target, preparation: r.phase ?? r.admission, admission: r.admission, submission: r.submission, observation: r.observation, unknown: r.unknown, nativeJsonText: r.nativeJsonText, operationId: r.operationId, unknownSource: r.unknownSource, controlEffect: r.controlEffect })), unknown: run.unknown, stopAvailable: scope.stopAvailable, recordingIds, ...(typeof run.newSubmission === 'boolean' ? { newSubmission: run.newSubmission } : {}), ...(run.coalescedExisting ? { coalescedExisting: true } : {}) }
     scope.trial = value; return structuredClone(value)
   }
   return api

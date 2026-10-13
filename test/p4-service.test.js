@@ -96,13 +96,37 @@ test('original cleanup has its own ticket and unknown is queried without mutatio
 test('trial metadata preserves SDK active state, Stop observation and native text without deriving business state', async () => {
   const x = setup(), scope = await x.scope()
   x.client.startTrial = async (b, intent) => x.receipt(b, intent, 'trial_start')
-  x.client.trialStatus = async (b, id) => ({ trialId: id, operation: x.receipt(b, { claimantId: 'chat', operationId: id }, 'trial_start'), trial: { state: 'active', stopObserved: false, stopConfirmationOverdue: false, elapsedMs: '18446744073709551615', nativeJsonText: '{"elapsed":18446744073709551615}' } })
+  const readIds = []
+  x.client.trialStatus = async (b, id) => { readIds.push(id); return ({ trialId: id, operation: x.receipt(b, { claimantId: 'chat', operationId: id }, 'trial_start'), trial: { state: 'active', stopObserved: false, stopConfirmationOverdue: false, elapsedMs: '18446744073709551615', nativeJsonText: '{"elapsed":18446744073709551615}' } }) }
   x.client.recordingStatus = async () => ({ recordingId: 'rec', active: true, failed: false, nativeJsonText: '{"active":true}' })
   const parameters = { mode: 'position', command: { positionMm: '1e-20', velocityMmS: '', forceN: '', equilibriumMm: '', stiffnessNPerMm: '', dampingNsPerMm: '' }, envelope: { positionMinMm: '0', positionMaxMm: '10', velocityAbsMaxMmS: '1', forceAbsMaxN: '1', stiffnessMaxNPerMm: '1', dampingMaxNsPerMm: '1', durationMaxS: '1' }, durationS: '1', reach: null }
   const start = await x.service.startControlTrial('chat', { scopeId: scope.scopeId, parameters })
   const context = await x.service.controlContext('chat'), trial = context.scopes[0].trial
   assert.equal(trial.trialId, start.trialId); assert.equal(trial.state, 'active'); assert.equal(trial.results[0].elapsedMs, '18446744073709551615'); assert.equal(trial.results[0].trialNativeJsonText, '{"elapsed":18446744073709551615}')
   assert.equal(context.scopes[0].recordings[0].active, true)
+  assert.notEqual(start.trialId, 'op1'); assert.deepEqual(readIds, ['op1'])
+  assert.equal(start.statusRead, 'not_read'); assert.equal(trial.statusRead, 'available')
+  const releasedActive = await x.service.releaseControlTrial('chat', start.trialId)
+  assert.equal(releasedActive.state, 'active'); assert.equal(releasedActive.referenceReleased, true)
+  x.client.trialStatus = async (_b, id) => { assert.equal(id, 'op1'); throw error('operation_not_found') }
+  const failed = await x.service.getControlTrial('chat', start.trialId)
+  assert.equal(failed.state, 'active'); assert.equal(failed.statusRead, 'unavailable')
+  assert.match(failed.progress.join(' '), /operation_not_found/)
+  const releaseAfterFailure = await x.service.releaseControlTrial('chat', start.trialId)
+  assert.deepEqual(releaseAfterFailure.progress, failed.progress)
+  assert.deepEqual(releaseAfterFailure.recordingIds, failed.recordingIds)
+  assert.equal(releaseAfterFailure.statusRead, 'unavailable')
+  assert.equal(failed.results[0].trialNativeJsonText, trial.results[0].trialNativeJsonText)
+  x.client.trialStatus = async (_b, id) => ({ trialId: id, trial: { state: 'completed', stopObserved: true, stopConfirmationOverdue: false, elapsedMs: '20', nativeJsonText: 'COMPLETED_ORIGINAL' } })
+  const completed = await x.service.getControlTrial('chat', start.trialId)
+  assert.equal(completed.state, 'completed'); assert.equal(completed.statusRead, 'available')
+  const releasedDone = await x.service.releaseControlTrial('chat', start.trialId)
+  assert.equal(releasedDone.state, 'completed'); assert.equal(releasedDone.referenceReleased, true)
+  x.descriptions.instance_id = 'new-instance'
+  const old = (await x.service.controlContext('chat')).scopes[0]
+  assert.equal(old.state, 'expired'); assert.equal(old.trial.state, 'completed'); assert.equal(old.trial.statusRead, 'historical')
+  assert.equal(old.trial.stopAvailable, false)
+
 })
 test('Stop remains callable while a target POST is unresolved and later target completion cannot replace Stop record', async () => {
   const x = setup(), scope = await x.scope(); let resolve
