@@ -1,8 +1,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtemp, chmod, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { createRecoveryJournal } from '../src/recovery-journal.js'
+import { createControlTools } from '../src/control-tools.js'
 import { createP4Service } from '../src/p4-service.js'
 const error = code => Object.assign(new Error(code), { code })
-function setup() {
+function setup(recoveryJournal = { prepare: async () => 'synthetic-record', complete: async () => {} }) {
   const gate = { hold: false }, calls = [], timers = [], bindings = [], descriptions = { instance_id: 'i', capabilities: ['control', 'control_groups', 'trials', 'recording_write', 'control_scopes'] }
   let serial = 0
   const receipt = (binding, intent, action) => ({ operationId: intent.operationId, claimantId: intent.claimantId, action, controlEpoch: '1', members: [{ targetId: binding.target_id, identity: { uid: binding.identity.uid, runNonce: binding.identity.run_nonce }, connectionGeneration: '1' }], admission: 'finished', submission: 'locally_submitted', controlEffect: 'known', observation: 'unconfirmed', phase: 'submission', nativeJsonText: '{"n":18446744073709551615}', error: null, newSubmission: true })
@@ -21,7 +26,7 @@ function setup() {
     controlScopes: async () => [{ stopRequestId: 'canonical', scope: { targetId: 'can:1', identity: { uid: 'u1', runNonce: 'n' }, connectionGeneration: '1', controlEpoch: '1' }, current: true, controlGranted: true }],
     stopControlOriginalScope: async (_i, id, intent) => { calls.push(['original', intent]); return receipt({ target_id: intent.expectedScope.targetId, identity: { uid: intent.expectedScope.identity.uid, run_nonce: intent.expectedScope.identity.runNonce } }, { operationId: id, claimantId: 'other' }, 'stop') },
   }
-  const service = createP4Service({ mode: 'service-v2', session: s => assert.ok(s), attach: async () => gate.hold ? new Promise(() => {}) : descriptions, currentInstance: () => descriptions.instance_id, http: () => client, schedule: callback => { timers.push(callback); return { unref() {} } }, clear() {} })
+  const service = createP4Service({ mode: 'service-v2', recoveryJournal, session: s => assert.ok(s), attach: async () => gate.hold ? new Promise(() => {}) : descriptions, currentInstance: () => descriptions.instance_id, http: () => client, schedule: callback => { timers.push(callback); return { unref() {} } }, clear() {} })
   const scope = async () => { const { candidates } = await service.controlCandidates('chat'); return service.createControlScope('chat', { candidateIds: [candidates[0].candidateId] }) }
   return { service, client, calls, timers, descriptions, scope, receipt, bindings, gate }
 }
@@ -176,4 +181,81 @@ test('read-only canonical Stop recovery seeds the same Stop cache and never repe
   const repeated = await x.service.stopOriginalScope('chat', scope.referenceId)
   assert.equal(repeated.unknownSource, 'sdk'); assert.equal(repeated.newSubmission, false)
   assert.equal(x.calls.filter(call => call[0] === 'original').length, 0)
+})
+
+test('ordinary control journal failure is definitely never POSTed while canonical Stop bypasses persistence', async () => {
+  let prepares = 0
+  const x = setup({ prepare: async () => { prepares++; throw error('recovery_capacity') }, complete: async () => { throw new Error('must not archive unprepared request') } }), scope = await x.scope()
+  const receipt = await x.service.submitControl('chat', { scopeId: scope.scopeId, command: { action: 'position', mm: '1' } })
+  assert.equal(receipt.unknown, false); assert.equal(receipt.results[0].submission, 'not_submitted'); assert.equal(receipt.results[0].operationId, null)
+  assert.equal(x.calls.filter(call => call[0] === 'command').length, 0)
+  await x.service.stopControlScope('chat', scope.scopeId); assert.equal(prepares, 1); assert.equal(x.calls.filter(call => call[0] === 'stop').length, 1)
+})
+
+test('Stop does not wait for ordinary journal I/O and persistence completion cannot POST into a stopped scope', async () => {
+  let release, begun
+  const entered = new Promise(resolve => { begun = resolve }), completed = []
+  const x = setup({ prepare: async (_s, value) => { assert.equal(value.members[0].stopRequestId, 'stop-b0'); begun(); await new Promise(resolve => { release = resolve }); return 'accepted-index' }, complete: async (_s, id, value) => completed.push([id, value]) }), scope = await x.scope()
+  const ordinary = x.service.submitControl('chat', { scopeId: scope.scopeId, command: { action: 'heartbeat_once' } }); await entered
+  await x.service.stopControlScope('chat', scope.scopeId)
+  assert.equal(x.calls.filter(call => call[0] === 'stop').length, 1); assert.equal(x.calls.filter(call => call[0] === 'command').length, 0)
+  release(); const receipt = await ordinary
+  assert.equal(receipt.unknown, false); assert.equal(receipt.results[0].submission, 'not_submitted'); assert.equal(completed[0][1].results[0].operationId, 'op1')
+  assert.equal(completed[0][1].unknown, false); assert.equal(x.calls.filter(call => call[0] === 'command').length, 0)
+})
+
+test('disposal during the durable journal await prevents the late ordinary POST', async () => {
+  let release, begun; const entered = new Promise(resolve => { begun = resolve })
+  const x = setup({ prepare: async () => { begun(); await new Promise(resolve => { release = resolve }); return 'accepted-index' }, complete: async () => {} }), scope = await x.scope()
+  const ordinary = x.service.submitControl('chat', { scopeId: scope.scopeId, command: { action: 'force', n: '1' } }); await entered
+  await x.service.disposeControlScopes(); release(); const receipt = await ordinary
+  assert.equal(receipt.unknown, false); assert.equal(receipt.results[0].error.code, 'disposed'); assert.equal(x.calls.filter(call => call[0] === 'command').length, 0)
+})
+
+test('group writes register all original SDK tickets in one durable admission before any POST', async () => {
+  let intents = [], posts = 0
+  const x = setup({ prepare: async (_s, intent) => { intents.push(intent); throw error('recovery_write_failed') }, complete: async () => {} })
+  x.client.createControlGroup = async (_i, bindings) => ({ groupId: 'group', reservationId: 'group-r', stopRequestId: 'group-stop', members: bindings.map(b => ({ bindingId: b.binding_id, controlEpoch: '1', stopRequestId: `stop-${b.binding_id}` })) })
+  x.client.groupTickets = async () => ({ requests: x.bindings.map((b, i) => ({ bindingId: b.binding_id, operationId: `group-op-${i}`, controlEpoch: '1' })) })
+  x.client.groupSubmit = async () => { posts++; throw new Error('must not submit') }
+  const { candidates } = await x.service.controlCandidates('chat'), scope = await x.service.createControlScope('chat', { candidateIds: candidates.map(c => c.candidateId) })
+  const receipt = await x.service.submitControl('chat', { scopeId: scope.scopeId, command: { action: 'velocity', mm_s: '1' } })
+  assert.equal(intents.length, 1); assert.deepEqual(intents[0].members.map(member => member.operationId), ['group-op-0', 'group-op-1'])
+  assert.equal(posts, 0); assert.equal(receipt.unknown, false)
+})
+
+test('model control/trial receipt survives Host recreation with exact original IDs and no restored execution scope', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'fieldkit-model-control-')); await chmod(directory, 0o700)
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const journal = createRecoveryJournal({ directory }), x = setup(journal), scope = await x.scope(), receipts = new Map()
+  x.client.controlCommand = async (binding, request) => { const value = { ...x.receipt(binding, request, request.command.action), reservationId: 'r', submission: 'unknown', controlEffect: 'unresolved' }; receipts.set(value.operationId, value); x.calls.push(['command']); return value }
+  const tool = createControlTools(x.service).find(tool => tool.name === 'fieldkit_control')
+  await tool.execute({ scopeId: scope.scopeId, command: { action: 'position', mm: '1e-30' } }, { agent: { id: 'chat' } }) // Browser never receives context or reply.
+  const fresh = createRecoveryJournal({ directory }), record = (await fresh.list('chat')).records[0]
+  assert.equal(record.result.unknown, true); assert.equal(record.members[0].stopRequestId, 'stop-b0')
+  const reopened = setup(fresh); assert.deepEqual((await reopened.service.controlContext('chat')).scopes, [])
+  let gets = 0
+  const read = await fresh.recover('chat', record.recordId, { instanceId: 'i', fetch: async (_kind, _instance, id) => { gets++; return receipts.get(id) } })
+  assert.equal(read.result.results[0].unknownSource, 'sdk'); assert.equal(gets, 1); assert.equal(x.calls.filter(c => c[0] === 'command').length, 1)
+  assert.equal(reopened.calls.length, 0)
+  const trialDir = join(directory, 'trial'), y = setup(createRecoveryJournal({ directory: trialDir })), trialScope = await y.scope()
+  y.client.startTrial = async (binding, request) => ({ ...y.receipt(binding, request, 'trial_start'), reservationId: 'r', submission: 'unknown', controlEffect: 'unresolved' })
+  const parameters = { mode: 'position', command: Object.fromEntries(['positionMm', 'velocityMmS', 'forceN', 'equilibriumMm', 'stiffnessNPerMm', 'dampingNsPerMm'].map(k => [k, '0'])), envelope: Object.fromEntries(['positionMinMm', 'positionMaxMm', 'velocityAbsMaxMmS', 'forceAbsMaxN', 'stiffnessMaxNPerMm', 'dampingMaxNsPerMm', 'durationMaxS'].map(k => [k, '1'])), durationS: '1', reach: null }
+  await createControlTools(y.service).find(tool => tool.name === 'fieldkit_trial').execute({ scopeId: trialScope.scopeId, parameters }, { agent: { id: 'chat' } })
+  const trialRecord = (await createRecoveryJournal({ directory: trialDir }).list('chat')).records[0]
+  assert.equal(trialRecord.action, 'trial_start'); assert.equal(trialRecord.result.unknown, true)
+})
+
+test('post-POST receipt persistence failure preserves the actual result and durable original intent', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'fieldkit-post-storage-')); await chmod(directory, 0o700)
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const journal = createRecoveryJournal({ directory }), x = setup(journal), scope = await x.scope()
+  x.client.controlCommand = async (binding, request) => { x.calls.push(['command']); await chmod(join(directory, 'record-000'), 0o755); return { ...x.receipt(binding, request, request.command.action), reservationId: 'r' } }
+  const value = await x.service.submitControl('chat', { scopeId: scope.scopeId, command: { action: 'position', mm: '0' } })
+  assert.equal(value.unknown, false); assert.equal(value.results[0].submission, 'locally_submitted'); assert.equal(value.results[0].operationId, 'op1')
+  await chmod(join(directory, 'record-000'), 0o700)
+  const history = (await journal.list('chat')).records[0]
+  assert.equal(history.pending, true); assert.equal(history.result, null); assert.ok(history.recoveryError); assert.deepEqual(history.operationIds, ['op1'])
+  const reopened = createRecoveryJournal({ directory }); assert.equal((await reopened.list('chat')).records[0].pending, true)
+  assert.equal(x.calls.filter(c => c[0] === 'command').length, 1)
 })

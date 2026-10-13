@@ -1,3 +1,6 @@
+import { createRecoveryJournal } from './recovery-journal.js'
+import { userDataDirectory } from './owner-process.js'
+import { join } from 'node:path'
 import { createP4Service } from './p4-service.js'
 import { createP3Service } from './p3-service.js'
 import { createP2Service } from './p2-service.js'
@@ -25,6 +28,7 @@ function sameIdentity(a, b) { return a && b && a.uid === b.uid && a.runNonce ===
 export function createFieldkitService(config = {}, dependencies = {}) {
   const mode = config.deviceMode ?? 'service-v2'
   if (!['service-v2', 'integration', 'legacy-cli'].includes(mode)) throw new TypeError('deviceMode must be service-v2, integration or legacy-cli')
+  const recoveryJournal = dependencies.recoveryJournal ?? createRecoveryJournal({ directory: join(dependencies.owner?.settingsRoot ?? userDataDirectory(), 'recovery-v1') })
   const sessions = new Map(), bindings = new Map(), runs = new Map(), completions = new Map(), pendingRelease = new Set(), opening = new Set()
   const reportWriter = dependencies.reportWriter ?? writeReport
   let integration = dependencies.integration, disposed = false, disposal = null
@@ -123,12 +127,20 @@ export function createFieldkitService(config = {}, dependencies = {}) {
     try { return await action(owner) }
     catch (error) { return { ...owner.snapshot(), error: { code: typeof error.code === 'string' ? error.code : 'service_unavailable', message: error.message } } }
   }
-  const p3 = createP3Service({ mode, session, selected, invalidateTarget: (target, error) => { const b = bindings.get(target.bindingId); if (b && b.owner?.instance_id === target.instanceId) expire(b, error) }, attach: async () => (await owner.attach()).description, http, busy: () => opening.size > 0 || [...runs.values()].some(r => r.status === 'running') })
-  const p4 = createP4Service({ mode, session, currentInstance: () => owner?.snapshot().instance?.instance_id, attach: async () => (await owner.attach()).description, http, busy: () => p3.maintenanceBusy() || opening.size > 0 || [...runs.values()].some(r => r.status === 'running') })
+  const p3 = createP3Service({ mode, session, recoveryJournal, selected, invalidateTarget: (target, error) => { const b = bindings.get(target.bindingId); if (b && b.owner?.instance_id === target.instanceId) expire(b, error) }, attach: async () => (await owner.attach()).description, http, busy: () => opening.size > 0 || [...runs.values()].some(r => r.status === 'running') })
+  const p4 = createP4Service({ mode, session, recoveryJournal, currentInstance: () => owner?.snapshot().instance?.instance_id, attach: async () => (await owner.attach()).description, http, busy: () => p3.maintenanceBusy() || opening.size > 0 || [...runs.values()].some(r => r.status === 'running') })
   const service = {
     ...p4,
     ...p3,
     ...createP2Service({ mode, session, attach: async () => (await owner.attach()).description, http, invalidateConnection: targetId => { for (const b of bindings.values()) if (b.target.targetId === targetId) { b.expired = true; stopRenewal(b); void releaseBinding(b, false) } } }),
+    async listRecoveryHistory(sessionId) { requireSession(sessionId); return recoveryJournal.list(sessionId) },
+    async forgetRecoveryRecord(sessionId, request) { requireSession(sessionId); requestFields(request, ['recordId']); return recoveryJournal.forget(sessionId, request.recordId) },
+    async readRecoveryRecord(sessionId, request) {
+      requireSession(sessionId); requestFields(request, ['recordId'])
+      if (!owner) fail('unsupported', '原操作恢复查询需要 service-v2。')
+      const description = (await owner.attach()).description
+      return recoveryJournal.recover(sessionId, request.recordId, { instanceId: description.instance_id, fetch: (kind, instanceId, operationId) => kind === 'maintenance' ? http().maintenanceOperation(instanceId, operationId) : http().controlOperation(instanceId, operationId) })
+    },
     serviceStatus() { return manage(o => o.status()) },
     saveServiceSettings(request) { return manage(o => o.save(request)) },
     startService() { return manage(o => o.start()) },

@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import type { FieldkitRecording } from '../remote-types.js'
 import { panelStyles, errorText } from './shared.js'
 import { finishJob, downloadBlob } from './async.js'
-export function Recordings({ remote, sessionId, capabilities }: any) {
+export function Recordings({ remote, sessionId, capabilities, onOpenControl }: any) {
   const [truncated, setTruncated] = useState(false)
   const [records, setRecords] = useState<readonly FieldkitRecording[]>([]), [notice, setNotice] = useState('服务侧记录独立于页面绘图。'), [busy, setBusy] = useState(false), [serial, setSerial] = useState(''), [devices, setDevices] = useState<string[]>([]), [odrive, setOdrive] = useState('')
   const alive = useRef(false), flight = useRef(false), styles = panelStyles(busy)
@@ -26,8 +26,8 @@ export function Recordings({ remote, sessionId, capabilities }: any) {
   }
   return React.createElement('section', { style: styles.card }, React.createElement('h2', null, '记录与独立 ODrive'), React.createElement('p', { role: 'status' }, notice),
     React.createElement('h3', null, '服务侧记录'),
-    React.createElement('button', { disabled: true }, '开始记录'), ' ', React.createElement('button', { disabled: true }, '结束记录'),
-    React.createElement('p', null, 'P4 门槛未开放：记录开始 / 结束需要服务能力、权限与动作账本。暂停绘图、切页或解除观察均不结束记录。'),
+    React.createElement('p', null, capabilities?.includes('recording_write') ? '开始 / 结束录制位于控制 / 试验页，使用已明确授权的固定范围。暂停绘图、切页或解除观察均不结束记录。' : '当前服务未发布 recording_write，不能从本服务开始 / 结束录制；已有历史仍可按读取能力查看。'),
+    capabilities?.includes('recording_write') && React.createElement('button', { onClick: onOpenControl, disabled: typeof onOpenControl !== 'function' }, '前往控制 / 试验'),
     button('刷新记录历史', async () => { const j = await finishJob(remote, sessionId, remote.listRecordings(sessionId), () => alive.current); if (alive.current) { setRecords(j.recordings ?? []); setTruncated(j.truncated === true) } }, !capabilities?.includes('recordings_read')),
     truncated && React.createElement('p', { role: 'alert' }, '历史或元数据已截断：可能达到条目数量、目录扫描或元数据总预算。当前列表不代表完整历史，缺失元数据不代表没有记录。'),
     records.map(r => React.createElement('details', { key: r.id }, React.createElement('summary', null, r.id), r.metadataJsonText === null ? React.createElement('p', null, '元数据不可读。') : React.createElement('pre', { style: styles.mono }, r.metadataJsonText), r.files.map(f => React.createElement(React.Fragment, { key: f }, button(`下载 ${f}`, () => download(r, f)), ' ')))),

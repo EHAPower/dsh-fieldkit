@@ -10,7 +10,7 @@ const clone = value => structuredClone(value)
 const rejected = new Set(['invalid_config', 'unsupported_permission', 'permission_denied', 'permission_revoked', 'permission_conflict', 'claimant_mismatch', 'reservation_busy', 'reservation_unknown', 'operation_capacity', 'request_id_expired', 'maintenance_busy', 'not_connected', 'binding_stale', 'identity_changed', 'invalid_request', 'instance_mismatch'])
 const raw = value => { if (typeof value !== 'string' || !value || Buffer.byteLength(value) > 60000) fail('bad_request', '请提供不超过 60000 UTF-8 字节的完整配置原文。') }
 /** Grants come only from the SDK; per-session registries never accept model-selected claimant IDs. */
-export function createP3Service({ mode, session, selected, attach, http, invalidateTarget = () => {}, busy = () => false }) {
+export function createP3Service({ mode, session, selected, attach, http, invalidateTarget = () => {}, busy = () => false, recoveryJournal }) {
   const contexts = new Map(), operations = new Map(), uidClaims = new Map()
   function context(s) { session(s); if (!contexts.has(s)) contexts.set(s, { grant: null, latestOperationId: null }); return contexts.get(s) }
   async function ready(s, capability) {
@@ -109,7 +109,11 @@ export function createP3Service({ mode, session, selected, attach, http, invalid
       const prior = uidClaims.get(current.uid)
       if (prior && (prior.receipt?.unknown || prior.receipt?.admission !== 'finished' || same(prior.receipt?.target, current))) fail('maintenance_busy', '该 UID 已有维护提交或未知记录；请核对原记录，不重试。')
       const preparing = { receipt: null }; uidClaims.set(current.uid, preparing)
-      let reservation, posted = false, record
+      let reservation, posted = false, record, recoveryRecordId = null
+      const finish = async value => {
+        if (recoveryRecordId) try { await recoveryJournal.complete(s, recoveryRecordId, { action: value.action, results: [{ ...value, operationId: value.operationId }], unknown: value.unknown, newSubmission: value.newSubmission }) } catch { /* Keep the original mutation receipt; the durable history reports its update failure. */ }
+        return value
+      }
       try {
         const client = b.client
         if (request.action === 'save_and_restart') await client.validateConfiguration(current.instanceId, request.rawRecordText)
@@ -120,21 +124,29 @@ export function createP3Service({ mode, session, selected, attach, http, invalid
         if (ticket.controlEpoch !== reservation.controlEpoch) fail('invalid_response', '维护票据代次不匹配。')
         if (!same(target(s), current) || c.grant !== grant) fail('binding_stale', '提交前身份或授权已变化。')
         record = { sessionId: s, binding: b, client, reservationId: reservation.reservationId, controlEpoch: ticket.controlEpoch, receipt: { operationId: ticket.operationId, grantId: grant.grantId, target: current, action: request.action, admission: 'queued', submission: 'not_attempted', controlEffect: 'not_attempted', observation: 'unconfirmed', phase: null, unknown: false, unknownSource: null, nativeJsonText: null, followUp: { reconnectRequired: false, readbackViews: [] }, error: null } }
+        if (!recoveryJournal) fail('recovery_unavailable', 'Host 持久恢复索引不可用；维护未提交。')
+        recoveryRecordId = await recoveryJournal.prepare(s, { kind: 'maintenance', action: request.action, instanceId: current.instanceId, members: [{ target: current, controlEpoch: ticket.controlEpoch, stopRequestId: reservation.stopRequestId ?? null, grantId: grant.grantId, reservationId: reservation.reservationId, operationId: ticket.operationId }] })
+        record.recoveryRecordId = recoveryRecordId
+        if (!same(target(s), current) || c.grant !== grant) fail('binding_stale', '持久登记期间原维护身份或授权已变化；维护未提交。')
         operations.set(ticket.operationId, record); c.latestOperationId = ticket.operationId; uidClaims.set(current.uid, record)
         posted = true
         const value = await client.submitMaintenance(b.owner, { ...request, operationId: ticket.operationId, reservationId: reservation.reservationId, claimantId: s })
-        return collect(record, value)
+        return finish(await collect(record, value))
       } catch (error) {
-        if (!posted) { invalidateReceipt({ sessionId: s, binding: b, receipt: { target: current, grantId: grant.grantId, error } }); throw error }
+        if (!posted) {
+          invalidateReceipt({ sessionId: s, binding: b, receipt: { target: current, grantId: grant.grantId, error } })
+          if (recoveryRecordId) await finish({ ...record.receipt, admission: 'finished', submission: 'not_submitted', controlEffect: 'not_attempted', unknown: false, error: { code: error.code ?? 'backend_error', message: error.message }, newSubmission: false })
+          throw error
+        }
         if (rejected.has(error.code)) {
           record.receipt = { ...record.receipt, admission: 'finished', submission: 'not_submitted', controlEffect: 'not_attempted', unknown: false, error: { code: error.code, message: error.message } }
           invalidateReceipt(record)
           await releaseKnown(record)
-          return receipt(record)
+          return finish(receipt(record))
         }
         // An HTTP failure is not evidence that bytes were never submitted. Keep the issued ID for read-only recovery.
         record.receipt = { ...record.receipt, submission: 'unknown', controlEffect: 'unresolved', unknown: true, unknownSource: 'transport', error: { code: typeof error.code === 'string' ? error.code : 'backend_error', message: error.message } }
-        return receipt(record)
+        return finish(receipt(record))
       } finally {
         if (!posted) {
           if (uidClaims.get(current.uid) === preparing) uidClaims.delete(current.uid)
@@ -145,7 +157,9 @@ export function createP3Service({ mode, session, selected, attach, http, invalid
     async getMaintenanceOperation(s, operationId) {
       const record = registered(s, operationId), d = await ready(s, 'operation_read')
       if (d.instance_id !== record.receipt.target.instanceId) fail('instance_mismatch', '原维护记录属于旧服务实例；保留审计，不向新实例重发。')
-      return collect(record, await record.client.maintenanceOperation(d.instance_id, operationId))
+      const value = await collect(record, await record.client.maintenanceOperation(d.instance_id, operationId))
+      if (record.recoveryRecordId) try { await recoveryJournal.complete(s, record.recoveryRecordId, { action: value.action, results: [value], unknown: value.unknown }) } catch { /* Keep original SDK facts; durable intent remains available for read-only recovery. */ }
+      return value
     },
   }
 }

@@ -52,7 +52,8 @@ export function createP3Client(request) {
       const value = await post('/control-reservations', binding.instance_id, { claimant_id: claimantId, permission: 'maintenance', members: [{ binding_id: binding.binding_id, ...gate(binding) }] })
       check(value.claimant_id === claimantId && value.permission === 'maintenance' && decimal(value.control_epoch) && Array.isArray(value.members) && value.members.length === 1, 'Invalid maintenance reservation')
       identifier(value.reservation_id)
-      return { reservationId: value.reservation_id, claimantId, controlEpoch: value.control_epoch, members: value.members.map(member) }
+      check(value.stop_request_id === null || typeof value.stop_request_id === 'string', 'Invalid maintenance Stop identity')
+      return { reservationId: value.reservation_id, claimantId, controlEpoch: value.control_epoch, stopRequestId: value.stop_request_id, members: value.members.map(member) }
     },
     async releaseMaintenanceReservation(instanceId, reservationId, claimantId) {
       const value = await post(`/control-reservations/${identifier(reservationId)}`, instanceId, { claimant_id: claimantId }, 'DELETE')

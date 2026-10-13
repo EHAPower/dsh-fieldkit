@@ -23,7 +23,7 @@ function settings(value) {
   if (!Number.isInteger(value.port) || value.port < 1 || value.port > 65535) throw new TypeError('端口须为 1–65535 的整数。')
   return Object.fromEntries(fields.map(k => [k, value[k]]))
 }
-async function privateDirectory(path) {
+export async function privateDirectory(path) {
   validPath(path)
   const parent = dirname(path)
   if (parent !== parse(path).root) {
@@ -44,7 +44,7 @@ async function privateDirectory(path) {
   const info = await lstat(path)
   if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o7777) !== 0o700 || (process.getuid && info.uid !== process.getuid())) fail('unsafe_path', '数据目录须由当前用户拥有且权限为 0700；请选用私有目录。')
 }
-async function readPrivate(path) {
+export async function readPrivate(path) {
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
   try {
     const info = await file.stat()

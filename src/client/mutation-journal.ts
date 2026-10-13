@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
-import type { FieldkitOriginalStopResult } from '../remote-types.js'
+import type { FieldkitOriginalStopResult, FieldkitRecoveryRecord } from '../remote-types.js'
+
+import { browserHistory, historyChanged, recoveryListeners, recoveryPrefix, sdkScopeKey } from './recovery-history.js'
 
 const prefix = 'eha-fieldkit.ui-pending.v1:'
 const message = 'UI 尚未取得本次请求的可关联回执；这不是设备结果。保留原会话与完整范围，不重复提交；原范围 Stop 仍可用。'
@@ -7,15 +9,17 @@ const persistedReceipt = (r: FieldkitOriginalStopResult): FieldkitOriginalStopRe
   referenceId: r.referenceId, scope: { referenceId: r.scope.referenceId, instanceId: r.scope.instanceId, targetId: r.scope.targetId, uid: r.scope.uid, runNonce: r.scope.runNonce, connectionGeneration: r.scope.connectionGeneration, controlEpoch: r.scope.controlEpoch, stopRequestId: r.scope.stopRequestId, current: r.scope.current, controlGranted: r.scope.controlGranted },
   operationId: r.operationId, action: r.action, admission: r.admission, submission: r.submission, controlEffect: r.controlEffect, observation: r.observation, unknown: r.unknown, unknownSource: r.unknownSource, nativeJsonText: null, error: null, newSubmission: r.newSubmission,
 })
-type Entry = { sessionId: string; scopeKey: string; action: string; receipt?: FieldkitOriginalStopResult }
+type Entry = { sessionId: string; scopeKey: string; action: string; receipt?: FieldkitOriginalStopResult; history?: FieldkitRecoveryRecord }
 
 /** Browser receipt journal only; SDK owns all device state and operation identities. */
 export function useMutationJournal() {
   const [, render] = useState(0)
   useEffect(() => {
-    const changed = (event: StorageEvent) => { if (event.key === null || event.key.startsWith(prefix)) render(value => value + 1) }
+    const changed = (event: StorageEvent) => { if (event.key === null || (event.key.startsWith(prefix) || event.key.startsWith(recoveryPrefix))) render(value => value + 1) }
+    const localChanged = () => render(value => value + 1)
+    recoveryListeners.add(localChanged)
     window.addEventListener('storage', changed)
-    return () => window.removeEventListener('storage', changed)
+    return () => { recoveryListeners.delete(localChanged); window.removeEventListener('storage', changed) }
   }, [])
   const entries = (): (Entry & { key: string })[] => {
     const result: (Entry & { key: string })[] = []
@@ -29,22 +33,24 @@ export function useMutationJournal() {
     return result
   }
   const reason = (sessionId: string, scopeKey: string): string | null => {
-    try { const entry = entries().find(entry => entry.sessionId === sessionId && entry.scopeKey === scopeKey); return entry ? entry.receipt ? '原操作尚未完成或结果未知；保留原编号，只读查询，不重新提交。' : message : null }
+    try { const entry = entries().find(entry => entry.sessionId === sessionId && entry.scopeKey === scopeKey); return entry ? entry.receipt ? '原操作尚未完成或结果未知；保留原编号，只读查询，不重新提交。' : message : browserHistory(sessionId).some(record => sdkScopeKey(record) === scopeKey && (record.pending || record.result?.unknown || record.result?.results.some(member => member.unknown || member.previousUnknown))) ? '历史未决证据仍存在；不恢复授权或重新提交，原范围 Stop 独立可用。' : null }
     catch { return '浏览器回执登记不可读取；不能发起普通提交。原范围 Stop 仍独立可用。' }
   }
-  const begin = (sessionId: string, scopeKey: string, action: string) => {
+  const begin = (sessionId: string, scopeKey: string, action: string, history?: FieldkitRecoveryRecord) => {
     const blocked = reason(sessionId, scopeKey)
     if (blocked) throw new Error(blocked)
     // This ID only names a browser journal entry, never an SDK operation or ticket.
     const key = `${prefix}${Date.now()}-${Math.random().toString(36).slice(2)}`
-    try { localStorage.setItem(key, JSON.stringify({ sessionId, scopeKey, action })) }
+    try { localStorage.setItem(key, JSON.stringify({ sessionId, scopeKey, action, history: history ? { ...history, recordId: key } : undefined })) }
     catch { throw new Error('浏览器回执登记不可写；本次未发送普通请求，原范围 Stop 仍可用。') }
+    historyChanged()
     render(value => value + 1)
     return (receipt?: FieldkitOriginalStopResult) => {
       // Only the exact in-flight call owning this key may acknowledge it.
       try {
         if (receipt && (receipt.unknown || receipt.admission !== 'finished')) localStorage.setItem(key, JSON.stringify({ sessionId, scopeKey, action, receipt: persistedReceipt(receipt) }))
         else localStorage.removeItem(key)
+        historyChanged()
         render(value => value + 1)
       }
       catch { /* Keep the conservative barrier if persistence is unavailable. */ }
@@ -65,5 +71,6 @@ export function useMutationJournal() {
       render(value => value + 1)
     } catch { /* Persistence failure never clears the original barrier. */ }
   }
-  return { reason, begin, receipts, reconcile }
+  const history = (sessionId: string): FieldkitRecoveryRecord[] => [...browserHistory(sessionId), ...entries().filter(entry => entry.sessionId === sessionId && entry.history).map(entry => entry.history!)]
+  return { reason, begin, receipts, reconcile, history }
 }

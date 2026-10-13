@@ -51,3 +51,14 @@ test('expired observation retains historical evidence but never claims active dr
   assert.match(rendered, /绑定已过期，所示为历史数据/); assert.doesNotMatch(rendered, /绘制中。/)
   assert.equal(requests, 0); assert.equal(ui.button('暂停绘制').props.disabled, true)
 })
+
+test('recording write capability links to the existing fixed-scope control page', () => {
+  let opened = 0
+  const ui = mount('Recordings', { remote: {}, sessionId: 's', capabilities: ['recording_write'], onOpenControl() { opened++ } })
+  ui.button('前往控制 / 试验').props.onClick()
+  assert.equal(opened, 1); assert.equal(ui.button('开始记录'), undefined)
+  assert.doesNotMatch(JSON.stringify(ui.nodes()), /P4 门槛/)
+  const unavailable = mount('Recordings', { remote: {}, sessionId: 's', capabilities: [] })
+  assert.equal(unavailable.button('前往控制 / 试验'), undefined)
+  assert.match(JSON.stringify(unavailable.nodes()), /未发布 recording_write/)
+})

@@ -1,17 +1,22 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtemp, chmod, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { createRecoveryJournal } from '../src/recovery-journal.js'
+import { createMaintenanceTools } from '../src/maintenance-tools.js'
 import { createP3Client } from '../src/p3-client.js'
 import { createP3Service } from '../src/p3-service.js'
 const uid = 'a'.repeat(24), nonce = 'b'.repeat(32)
 const owner = { instance_id: 'instance', binding_id: 'sdk-binding', target_id: 'usb', identity: { uid, run_nonce: nonce }, connection_generation: '1' }
 const member = { bindingId: 'sdk-binding', targetId: 'usb', identity: { uid, runNonce: nonce }, connectionGeneration: '1', grantId: 'sdk-grant' }
-function fixture(overrides = {}) {
+function fixture(overrides = {}, recoveryJournal = { prepare: async () => 'synthetic-record', complete: async () => {} }) {
   let postCount = 0
   const sessions = new Map(), b = { id: 'local-binding', owner, target: { targetId: 'usb' }, expired: false }
   const value = { operationId: 'issued-1', reservationId: 'reservation', claimantId: 'chat', action: 'reset_application', controlEpoch: '2', members: [member], admission: 'attempting', submission: 'not_attempted', controlEffect: 'not_attempted', observation: 'unconfirmed', phase: 'submission', nativeJsonText: null, followUp: { reconnectRequired: false, readbackViews: [] }, error: null, newSubmission: true }
   const client = { maintenancePermission: async (_b, enabled) => ({ ...member, grantId: enabled ? 'sdk-grant' : null, maintenance: enabled }), maintenanceReservation: async () => ({ reservationId: 'reservation', controlEpoch: '2', members: [member] }), maintenanceTicket: async () => ({ operationId: 'issued-1', controlEpoch: '2' }), submitMaintenance: async () => { postCount++; return value }, maintenanceOperation: async () => value, releaseMaintenanceReservation: async () => ({}), validateConfiguration: async () => ({ valid: true }), ...overrides }
   b.client = client
-  const service = createP3Service({ mode: 'service-v2', session: s => { if (!sessions.has(s)) sessions.set(s, { selectedBindingId: b.id }); return sessions.get(s) }, selected: s => { if (s !== 'chat' || b.expired) throw new Error('stale'); return b }, attach: async () => ({ instance_id: 'instance', capabilities: ['maintenance', 'maintenance_permissions', 'operation_read', 'config_validate'] }), http: () => client })
+  const service = createP3Service({ mode: 'service-v2', recoveryJournal, session: s => { if (!sessions.has(s)) sessions.set(s, { selectedBindingId: b.id }); return sessions.get(s) }, selected: s => { if (s !== 'chat' || b.expired) throw new Error('stale'); return b }, attach: async () => ({ instance_id: 'instance', capabilities: ['maintenance', 'maintenance_permissions', 'operation_read', 'config_validate'] }), http: () => client })
   const target = { instanceId: 'instance', bindingId: b.id, targetId: 'usb', uid, runNonce: nonce, connectionGeneration: '1' }
   return { service, target, b, value, client, posts: () => postCount, grant: () => service.setMaintenancePermission('chat', { target, enabled: true }) }
 }
@@ -110,4 +115,38 @@ test('querying an old revoked-grant receipt cannot revoke a newer explicit human
   f.client.maintenancePermission = async () => ({ ...member, grantId: 'new-human-grant', maintenance: true })
   await f.grant(); await f.service.getMaintenanceOperation('chat', 'issued-1')
   assert.equal((await f.service.maintenanceContext('chat')).grant.grantId, 'new-human-grant')
+})
+
+test('maintenance durable write failure refuses POST and releases its unconsumed reservation without SDK unknown', async () => {
+  let releases = 0
+  const f = fixture({ releaseMaintenanceReservation: async () => { releases++; return {} } }, { prepare: async () => { throw Object.assign(new Error('disk full'), { code: 'recovery_capacity' }) }, complete: async () => {} })
+  await f.grant()
+  await assert.rejects(f.service.submitMaintenance('chat', { grantId: 'sdk-grant', action: 'reset_application' }), { code: 'recovery_capacity' })
+  assert.equal(f.posts(), 0); assert.equal(releases, 1); assert.equal((await f.service.maintenanceContext('chat')).latestOperation, null)
+})
+
+test('maintenance target or human grant changed during persistence cannot be POSTed', async () => {
+  let release, begun; const entered = new Promise(resolve => { begun = resolve }), completed = []
+  const f = fixture({}, { prepare: async () => { begun(); await new Promise(resolve => { release = resolve }); return 'accepted-index' }, complete: async (_s, _id, value) => completed.push(value) })
+  await f.grant(); const pending = f.service.submitMaintenance('chat', { grantId: 'sdk-grant', action: 'reset_application' }); await entered
+  await f.service.setMaintenancePermission('chat', { target: f.target, enabled: false }); release()
+  await assert.rejects(pending, { code: 'binding_stale' }); assert.equal(f.posts(), 0)
+  assert.equal(completed[0].unknown, false); assert.equal(completed[0].results[0].submission, 'not_submitted')
+})
+
+test('model-only maintenance intent survives Host recreation without browser receipt, grant restore or POST retry', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'fieldkit-model-maintenance-')); await chmod(directory, 0o700)
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const journal = createRecoveryJournal({ directory }), f = fixture({}, journal); await f.grant()
+  f.value.admission = 'finished'; f.value.submission = 'unknown'; f.value.controlEffect = 'unresolved'
+  const tool = createMaintenanceTools(f.service).find(tool => tool.name === 'fieldkit_maintenance')
+  await tool.execute({ grantId: 'sdk-grant', action: 'reset_application' }, { agent: { id: 'chat' } }) // Browser never consumes this reply.
+  const fresh = createRecoveryJournal({ directory }), [{ recordId, result }] = (await fresh.list('chat')).records
+  assert.equal(result.unknown, true); assert.equal(result.results[0].operationId, 'issued-1')
+  const reopened = fixture({}, fresh)
+  assert.equal((await reopened.service.maintenanceContext('chat')).grant, null)
+  let gets = 0
+  const recovered = await fresh.recover('chat', recordId, { instanceId: 'instance', fetch: async (kind, instance, id) => { gets++; assert.deepEqual([kind, instance, id], ['maintenance', 'instance', 'issued-1']); return f.value } })
+  assert.equal(recovered.result.results[0].unknownSource, 'sdk'); assert.equal(gets, 1)
+  assert.equal(f.posts(), 1); assert.equal(reopened.posts(), 0)
 })

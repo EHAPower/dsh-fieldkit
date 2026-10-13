@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import type { FieldkitBinding, FieldkitControlCandidate, FieldkitControlCommand, FieldkitControlContext, FieldkitControlResult, FieldkitControlScope, FieldkitMaintenanceTarget, FieldkitTrialReceipt, FieldkitOriginalStopScope, FieldkitOriginalStopResult } from '../remote-types.js'
+import { pendingHistory, saveReceivedHistory, sdkScopeKey } from './recovery-history.js'
 import { useMutationJournal } from './mutation-journal.js'
 import { Control, type ControlDemand, type ControlReceipt } from './Control.js'
 import { Trials, type TrialReceipt } from './Trials.js'
@@ -12,6 +13,9 @@ const mutationUncertain = (error: any) => error?.unknown === true || error?.unkn
 const membersText = (scope: FieldkitControlScope) => scope.members.map(member => member.target.targetId).join('、')
 const emptyContext = (): FieldkitControlContext => ({ scopes: [], activeScopeId: null, capabilities: [] })
 const sameMembers = (members: readonly FieldkitMaintenanceTarget[], scope: FieldkitControlScope) => members.length === scope.members.length && members.every(member => scope.members.some(original => targetKey(original.target) === targetKey(member)))
+function trialEvidence(fixed: FieldkitControlScope, action: string, result: FieldkitTrialReceipt): FieldkitControlResult {
+  return { scopeId: fixed.scopeId, action, unknown: result.unknown, results: result.results.map(member => ({ ...member, operationId: member.operationId ?? null, controlEffect: member.controlEffect ?? 'not_attempted', unknownSource: member.unknownSource ?? null, observation: member.observation ?? 'unconfirmed', phase: null, nativeJsonText: null, error: null })) }
+}
 function checkResult(result: FieldkitControlResult, scope: FieldkitControlScope, action?: string) {
   if (result.scopeId !== scope.scopeId || action !== undefined && result.action !== action || !sameMembers(result.results.map(member => member.target), scope) || new Set(result.results.map(member => targetKey(member.target))).size !== scope.members.length) throw new Error('控制结果与原固定范围的完整成员或动作不一致；请查询原记录。')
   return result
@@ -25,6 +29,7 @@ function ResultEvidence({ result }: { result: FieldkitControlResult | null }) {
       member.unknown && React.createElement('p', { role: 'alert' }, `结果未知 · 来源 ${text(member.unknownSource)}`),
       member.previousOperationId && React.createElement('details', null, React.createElement('summary', null, `先前操作 ${member.previousOperationId} · 提交 ${member.previousSubmission} · 未知 ${member.previousUnknown ? '是' : '否'}（不是本次提交）`), React.createElement('pre', { style: styles.mono }, member.previousNativeJsonText ?? '无原文')),
       member.error && React.createElement('p', { role: 'alert' }, `${member.error.code}：${member.error.message}`),
+      member.error?.code === 'recording_failed' && React.createElement('p', null, '录制失败：请核对服务记录目录的可用空间与写权限，并保留原错误。' + (member.submission === 'not_submitted' ? '仅本操作明确未提交；' : '') + '原范围 Stop 仍独立可用，此结果不证明机械停止。'),
       member.stopAttemptDelayMs !== undefined && React.createElement('p', null, `Stop 本地提交尝试延迟 ms：${text(member.stopAttemptDelayMs)}`),
       member.recordingId && React.createElement('p', null, `服务记录编号：${member.recordingId}`),
       member.nativeJsonText && React.createElement('details', null, React.createElement('summary', null, 'SDK 原始证据'), React.createElement('pre', { style: styles.mono }, member.nativeJsonText)))),
@@ -70,7 +75,10 @@ export function ScopeStopBar({ fixedScope, status, onStop }: ScopeStopBarProps) 
 const originalKey = (scope: FieldkitOriginalStopScope) => JSON.stringify([scope.referenceId, scope.instanceId, scope.targetId, scope.uid, scope.runNonce, scope.connectionGeneration, scope.controlEpoch, scope.stopRequestId])
 const originalJournalKey = (scope: FieldkitOriginalStopScope) => JSON.stringify([scope.instanceId, scope.targetId, scope.uid, scope.runNonce, scope.connectionGeneration, scope.controlEpoch, scope.stopRequestId])
 /** 只使用Host已登记的原执行引用；不创建观察binding、不迁移到当前别名。 */
-export function OriginalScopeStop({ remote, sessionId }: { remote: any; sessionId: string }) {
+export function OriginalScopeStop({ remote, sessionId, currentInstanceId }: { remote: any; sessionId: string; currentInstanceId: string | null }) {
+  const instance = useRef({ id: currentInstanceId, epoch: 0 })
+  if (instance.current.id !== currentInstanceId) instance.current = { id: currentInstanceId, epoch: instance.current.epoch + 1 }
+  const instanceEpoch = instance.current.epoch
   type ReceiptMap = Partial<Record<'stop' | 'heartbeat_stop' | 'recording_stop', FieldkitOriginalStopResult>>
   const journal = useMutationJournal(), originalReceipts = useRef(new Map<string, ReceiptMap>())
   const anonymousKey = (scope: FieldkitOriginalStopScope) => JSON.stringify([sessionId, originalJournalKey(scope)])
@@ -83,7 +91,7 @@ export function OriginalScopeStop({ remote, sessionId }: { remote: any; sessionI
   const currentPending = pending.generation === generation ? pending : { reading: false, stopping: false, cleaning: false, querying: false }
   const { reading, stopping, cleaning, querying } = currentPending
   const state = stored.generation === generation ? stored : { generation, scopes: [], selected: '', receipts: {}, notice: '' }
-  const selected = state.scopes.find(scope => scope.referenceId === state.selected) ?? null, key = selected ? originalKey(selected) : ''
+  const selected = state.scopes.find(scope => scope.referenceId === state.selected) ?? null, key = `${selected ? originalKey(selected) : ''}:${instanceEpoch}`
   const recovered = selected ? Object.fromEntries(journal.receipts(sessionId, originalJournalKey(selected)).map(receipt => [receipt.action ?? 'stop', receipt])) as ReceiptMap : {}
   const receipts = { ...recovered, ...(selected ? originalReceipts.current.get(anonymousKey(selected)) ?? {} : {}) }
   const selection = useRef({ key, generation: 0 })
@@ -92,13 +100,14 @@ export function OriginalScopeStop({ remote, sessionId }: { remote: any; sessionI
   const update = (next: typeof state) => { if (active()) setStored(next) }
   const setFlight = (field: 'reading' | 'stopping' | 'cleaning' | 'querying', value: boolean) => { if (active()) { live.current[field] = value; setPending({ generation, reading: live.current.reading, stopping: live.current.stopping, cleaning: live.current.cleaning, querying: live.current.querying }) } }
   const read = async () => {
-    if (!sessionId || live.current.reading) return
+    if (!sessionId || !instance.current.id || live.current.reading) return
     setFlight('reading', true)
-    try { const result = valueOf(await remote.listOriginalStopScopes(sessionId)); update({ generation, scopes: result.scopes, selected: '', receipts: {}, notice: '原执行范围已读取；请明确选择，不使用当前观察别名替换通路。' }) }
+    try { const result = valueOf(await remote.listOriginalStopScopes(sessionId)); if (instance.current.epoch !== instanceEpoch) return; update({ generation, scopes: result.scopes, selected: '', receipts: {}, notice: '原执行范围已读取；请明确选择，不使用当前观察别名替换通路。' }) }
     catch (error) { update({ ...state, notice: `原执行范围读取失败：${errorText(error)}` }) }
     finally { setFlight('reading', false) }
   }
-  const reason = !selected ? '请先明确读取并选择一个原执行范围。' : !selected.current ? '原执行范围已过期；不替换路由或重发。' : !selected.controlGranted ? '原范围尚无人类 control 授权；须在原范围明确人工授权，不能自动授权或换通路。' : null
+  const instanceReason = !currentInstanceId ? '当前没有已认证运行的服务实例；原范围仅保留历史。' : selected && selected.instanceId !== currentInstanceId ? '该范围属于旧服务实例；只能查看历史。请显式读取并选择当前实例的原执行范围。' : null
+  const reason = instanceReason ?? (!selected ? '请先明确读取并选择一个原执行范围。' : !selected.current ? '原执行范围已过期；不替换路由或重发。' : !selected.controlGranted ? '原范围尚无人类 control 授权；须在原范围明确人工授权，不能自动授权或换通路。' : null)
   const checked = (result: FieldkitOriginalStopResult, original: FieldkitOriginalStopScope, action: 'stop' | 'heartbeat_stop' | 'recording_stop', operationId?: string) => {
     if (result.referenceId !== original.referenceId || originalKey(result.scope) !== originalKey(original) || !result.operationId || operationId !== undefined && result.operationId !== operationId || action === 'stop' && result.operationId !== original.stopRequestId || action !== 'stop' && result.action !== action) throw new Error('原执行范围回执与所选身份、控制 epoch、动作或原操作编号不一致。')
     return result
@@ -128,7 +137,7 @@ export function OriginalScopeStop({ remote, sessionId }: { remote: any; sessionI
     finally { setFlight('cleaning', false) }
   }
   const query = async (action: 'stop' | 'heartbeat_stop' | 'recording_stop', receipt: FieldkitOriginalStopResult) => {
-    if (!selected || originalJournalKey(receipt.scope) !== originalJournalKey(selected) || !sameSelection() || live.current.querying || live.current.reading) return
+    if (!selected || !instance.current.id || selected.instanceId !== instance.current.id || originalJournalKey(receipt.scope) !== originalJournalKey(selected) || !sameSelection() || live.current.querying || live.current.reading) return
     const original = selected; setFlight('querying', true)
     try { const result = checked(valueOf(await remote.getOriginalScopeOperation(sessionId, { referenceId: original.referenceId, operationId: receipt.operationId, action })), original, action, receipt.operationId); if (receipt.unknownSource === 'sdk' && !result.unknown) throw new Error('原 SDK 未知证据不可降格。'); journal.reconcile(sessionId, originalJournalKey(original), result); publish(action, result, '原操作只读记录已返回；没有新增提交。') }
     catch (error) { if (sameSelection()) setStored(previous => ({ ...previous, notice: `原操作只读查询失败：${errorText(error)}；保留已有回执，不改变其提交事实。` })) }
@@ -137,9 +146,9 @@ export function OriginalScopeStop({ remote, sessionId }: { remote: any; sessionI
   const styles = panelStyles(stopping)
   return React.createElement('section', { style: styles.card, 'aria-label': '原执行范围普通 Stop' }, React.createElement('h3', null, '原执行范围普通 Stop'),
     React.createElement('p', null, '跨 USB/CAN 别名不自动换路由。此处只停止明确选择的原执行范围；原范围没有授权时不自动生成授权。'),
-    React.createElement('button', { disabled: reading || !sessionId, onClick: read }, '读取原执行范围'),
+    React.createElement('button', { disabled: reading || !sessionId || !currentInstanceId, onClick: read }, '读取原执行范围'),
     React.createElement('select', { 'aria-label': '明确选择原执行范围', value: state.selected, disabled: reading, onChange: (event: React.ChangeEvent<HTMLSelectElement>) => { const selected = event.target.value; if (!selected || state.scopes.some(scope => scope.referenceId === selected)) { live.current.heartbeat_stop = false; live.current.recording_stop = false; setConfirmation({ key: '', heartbeat_stop: false, recording_stop: false }); update({ ...state, selected, receipts: {}, notice: '' }) } } }, React.createElement('option', { value: '' }, '请明确选择原执行范围'), ...state.scopes.map(scope => React.createElement('option', { key: scope.referenceId, value: scope.referenceId }, `${scope.targetId} · UID ${scope.uid} · epoch ${scope.controlEpoch}`))),
-    selected && React.createElement('p', null, `原目标 ${selected.targetId} · UID ${selected.uid} · run_nonce ${selected.runNonce} · 连接代次 ${selected.connectionGeneration} · control epoch ${selected.controlEpoch} · 实例 ${selected.instanceId} · Stop 编号 ${selected.stopRequestId} · 当前范围 ${selected.current ? '是' : '否'}`),
+    selected && React.createElement('p', null, `原目标 ${selected.targetId} · UID ${selected.uid} · run_nonce ${selected.runNonce} · 连接代次 ${selected.connectionGeneration} · control epoch ${selected.controlEpoch} · 实例 ${selected.instanceId} · Stop 编号 ${selected.stopRequestId} · 当前范围 ${selected.current && selected.instanceId === currentInstanceId ? '是' : '否'}`),
     reason && React.createElement('p', { role: 'status' }, reason), React.createElement('button', { disabled: !!reason || stopping || reading, onClick: stop }, '请求所选原执行范围 Stop'),
     ...(['heartbeat_stop', 'recording_stop'] as const).map(action => { const label = action === 'heartbeat_stop' ? '停止原范围持续心跳' : '停止原范围记录'; return React.createElement('div', { key: action },
       React.createElement('label', null, React.createElement('input', { type: 'checkbox', 'aria-label': `确认${label}（不发送 Stop）`, checked: confirmation.key === key && confirmation[action], disabled: !!reason || cleaning || querying || unresolved, onChange: (event: React.ChangeEvent<HTMLInputElement>) => { if (!sameSelection()) return; live.current[action] = event.target.checked; setConfirmation(previous => ({ ...previous, key, [action]: event.target.checked })) } }), `确认${label}（不发送 Stop）`),
@@ -153,7 +162,7 @@ export function OriginalScopeStop({ remote, sessionId }: { remote: any; sessionI
       receipt.error && React.createElement('p', { role: 'alert' }, `${receipt.error.code}：${receipt.error.message}`),
       receipt.newSubmission === false && React.createElement('p', null, '本次响应未新增提交（查询或沿用记录也会如此）；原操作的本地提交事实见逐台记录。'),
       receipt.referenceId !== selected?.referenceId && React.createElement('p', { role: 'alert' }, '此编号来自先前 Host 引用；仅对当前人工所选的同一 SDK 范围查询原编号，服务须重新核对完整身份、动作与原会话归属。'),
-      React.createElement('button', { disabled: reading || querying || cleaning, onClick: () => query(action as 'stop' | 'heartbeat_stop' | 'recording_stop', receipt) }, `只读查询原操作 ${receipt.operationId}`),
+      React.createElement('button', { disabled: reading || querying || cleaning || !!instanceReason, onClick: () => query(action as 'stop' | 'heartbeat_stop' | 'recording_stop', receipt) }, `只读查询原操作 ${receipt.operationId}`),
       receipt.nativeJsonText && React.createElement('details', null, React.createElement('summary', null, '原操作 SDK 证据'), React.createElement('pre', { style: styles.mono }, receipt.nativeJsonText)))))
 }
 
@@ -207,7 +216,7 @@ export function ControlWorkbench({ remote, sessionId, currentBinding, busy, visi
   const [metadataNotice, setMetadataNotice] = useState('')
   const [recordAction, setRecordAction] = useState<'start' | 'stop'>('start'), [recordConfirmation, setRecordConfirmation] = useState(''), [releaseConfirmation, setReleaseConfirmation] = useState('')
   const journal = useMutationJournal()
-  const anonymousKey = (fixed: FieldkitControlScope) => JSON.stringify([sessionId, fixed.scopeId, fixed.instanceId, fixed.members.map(member => targetKey(member.target)).sort()])
+  const anonymousKey = (fixed: FieldkitControlScope) => sdkScopeKey(fixed)
   const [receipts, setReceipts] = useState<Record<string, FieldkitControlResult>>({})
   const live = useRef({ sessionId, generation: 0, alive: true }), flight = useRef(false), stopFlights = useRef(new Set<string>()), queryChain = useRef(Promise.resolve()), callback = useRef(onContextChange), reloadLatest = useRef<(() => Promise<void>) | null>(null)
   callback.current = onContextChange
@@ -222,6 +231,12 @@ export function ControlWorkbench({ remote, sessionId, currentBinding, busy, visi
       const next: FieldkitControlContext = valueOf(await remote.controlContext(sessionId))
       if (!active()) return
       publish(next)
+      for (const fixed of next.scopes) {
+        try {
+          for (const result of [fixed.latest, fixed.lastOrdinary]) if (result) saveReceivedHistory(sessionId, fixed, result)
+          if (fixed.trial?.action) saveReceivedHistory(sessionId, fixed, trialEvidence(fixed, fixed.trial.action, fixed.trial))
+        } catch { setNotice('浏览器历史证据保存失败；当前服务回执仍显示，原范围 Stop 不受此存储失败阻挡。') }
+      }
       if (withCandidates && next.capabilities.includes('control')) {
         const result = valueOf(await remote.controlCandidates(sessionId))
         if (active()) {
@@ -270,19 +285,25 @@ export function ControlWorkbench({ remote, sessionId, currentBinding, busy, visi
   }
   const original = (fixed: FieldkitControlScope) => { if (!active() || !context.scopes.some(item => fixedKey(item) === fixedKey(fixed))) throw new Error('原固定控制范围已变化；不提交新动作。') }
   const remember = (result: FieldkitControlResult) => { if (active()) setReceipts(current => ({ ...current, [result.scopeId]: result })) }
-  const mutation = async <T,>(fixed: FieldkitControlScope, work: () => Promise<T>): Promise<T> => {
+  const mutation = async <T extends FieldkitControlResult | FieldkitTrialReceipt,>(fixed: FieldkitControlScope, action: string, work: () => Promise<T>): Promise<T> => {
     original(fixed)
     const blocked = journal.reason(sessionId, anonymousKey(fixed))
     if (blocked) throw new Error(blocked)
-    const acknowledge = journal.begin(sessionId, anonymousKey(fixed), 'ordinary')
-    try { const result = await work(); acknowledge(); return result }
+    const acknowledge = journal.begin(sessionId, anonymousKey(fixed), action, pendingHistory(fixed, action))
+    try {
+      const result = await work()
+      const evidence: FieldkitControlResult = 'scopeId' in result ? result : trialEvidence(fixed, action, result)
+      try { saveReceivedHistory(sessionId, fixed, evidence); acknowledge() }
+      catch { if (active()) setNotice('历史证据保存失败；原请求登记保留，不重发。已收到的回执仍如下显示。') }
+      return result
+    }
     catch (error) {
       if (!mutationUncertain(error)) acknowledge()
       else if (active()) setNotice('UI 未取得可关联回执；保留原范围，不重复提交。')
       throw error
     }
   }
-  const command = (fixed: FieldkitControlScope, raw: FieldkitControlCommand) => ordinary(() => mutation(fixed, async () => { const result = checkResult(valueOf(await remote.submitControl(sessionId, { scopeId: fixed.scopeId, command: raw })), fixed, raw.action); remember(result); return result }))
+  const command = (fixed: FieldkitControlScope, raw: FieldkitControlCommand) => ordinary(() => mutation(fixed, raw.action, async () => { const result = checkResult(valueOf(await remote.submitControl(sessionId, { scopeId: fixed.scopeId, command: raw })), fixed, raw.action); remember(result); return result }))
   const stop = async (fixed: FieldkitControlScope) => {
     if (!active() || stopFlights.current.has(fixed.scopeId) || !fixed.stopAvailable) throw new Error('原范围 Stop 正在处理或当前不可用。')
     stopFlights.current.add(fixed.scopeId)
@@ -304,7 +325,7 @@ export function ControlWorkbench({ remote, sessionId, currentBinding, busy, visi
   if (intents.current.recordingToken !== recordingToken) { intents.current.recordingToken = recordingToken; intents.current.recording = '' }
   if (intents.current.releaseToken !== scopeToken) { intents.current.releaseToken = scopeToken; intents.current.release = '' }
   const styles = panelStyles(busy || working)
-  const trial = async (work: () => Promise<any>, fixed: FieldkitControlScope): Promise<TrialReceipt> => ordinary(() => mutation(fixed, async () => {
+  const trial = async (work: () => Promise<any>, fixed: FieldkitControlScope, action: string): Promise<TrialReceipt> => ordinary(() => mutation(fixed, action, async () => {
     original(fixed); const receipt: FieldkitTrialReceipt = valueOf(await work())
     if (!sameMembers(receipt.members, fixed)) throw new Error('试验记录与原固定成员不一致。')
     return receipt
@@ -345,17 +366,17 @@ export function ControlWorkbench({ remote, sessionId, currentBinding, busy, visi
     scope?.kind === 'group' && React.createElement(GroupControl, { key: `group:${scopeToken}`, scope, busy: busy || working, reason, onCommand: (raw: FieldkitControlCommand) => command(scope, raw) }),
     scope && React.createElement(ResultEvidence, { result: latest }),
     scope && React.createElement(Trials, { key: `trials:${scopeToken}`, candidates: members, reservation: { reservationId: scope.scopeId, members }, receipt: scope.trial, busy: busy || working, stopGateReason: scope.stopReason ?? (!scope.stopAvailable ? '服务未允许原范围 Stop。' : null), gateReason: reason ?? (!context.capabilities.includes('trials') ? '服务未发布 trials。' : null),
-      onStart: (request: { parameters: any; members: readonly FieldkitMaintenanceTarget[] }) => { if (!sameMembers(request.members, scope)) throw new Error('必须明确确认固定范围的全部成员。'); return trial(() => remote.startControlTrial(sessionId, { scopeId: scope.scopeId, parameters: request.parameters }), scope) },
-      onUpdate: (request: { trialId: string; positionRaw: string }) => trial(() => remote.updateControlTrial(sessionId, { trialId: request.trialId, positionRaw: request.positionRaw }), scope),
+      onStart: (request: { parameters: any; members: readonly FieldkitMaintenanceTarget[] }) => { if (!sameMembers(request.members, scope)) throw new Error('必须明确确认固定范围的全部成员。'); return trial(() => remote.startControlTrial(sessionId, { scopeId: scope.scopeId, parameters: request.parameters }), scope, 'trial_start') },
+      onUpdate: (request: { trialId: string; positionRaw: string }) => trial(() => remote.updateControlTrial(sessionId, { trialId: request.trialId, positionRaw: request.positionRaw }), scope, 'trial_target'),
       onTrialStop: (request: { trialId: string }) => trialStop(scope, request.trialId), onScopeStop: () => trialStop(scope, null),
-      onRelease: (request: { trialId: string }) => trial(() => remote.releaseControlTrial(sessionId, request.trialId), scope).then(() => {}) }),
+      onRelease: (request: { trialId: string }) => ordinary(() => remote.releaseControlTrial(sessionId, request.trialId).then(valueOf)).then(() => {}) }),
     scope && React.createElement('section', { style: styles.card }, React.createElement('h3', null, '服务记录与范围引用'),
       React.createElement('select', { 'aria-label': '固定范围录制动作', value: recordAction, disabled: busy || working, onChange: (event: React.ChangeEvent<HTMLSelectElement>) => { if (['start', 'stop'].includes(event.target.value)) setRecordAction(event.target.value as 'start' | 'stop') } }, React.createElement('option', { value: 'start' }, '开始服务录制'), React.createElement('option', { value: 'stop' }, '结束服务录制')),
       React.createElement('label', null, React.createElement('input', { type: 'checkbox', 'aria-label': '确认全部固定成员的录制动作', disabled: busy || working || !!reason || !context.capabilities.includes('recording_write'), checked: recordConfirmation === recordingToken && intents.current.recording === recordingToken, onChange: (event: React.ChangeEvent<HTMLInputElement>) => { intents.current.recording = event.target.checked ? recordingToken : ''; setRecordConfirmation(intents.current.recording) } }), `确认全部固定成员 ${membersText(scope)} 的录制 ${recordAction}；路径由服务管理`),
       React.createElement('button', { disabled: busy || working || !!reason || !context.capabilities.includes('recording_write') || recordConfirmation !== recordingToken || intents.current.recording !== recordingToken, onClick: async () => {
         if (intents.current.recording !== recordingToken) return
         intents.current.recording = ''; setRecordConfirmation('')
-        try { await ordinary(() => mutation(scope, async () => { remember(checkResult(valueOf(await remote.recordControl(sessionId, { scopeId: scope.scopeId, action: recordAction })), scope, `recording_${recordAction}`)) })) } catch (error) { if (active()) setNotice(`录制响应未确认：${errorText(error)}；不重发。`) }
+        try { await ordinary(() => mutation(scope, `recording_${recordAction}`, async () => { const result = checkResult(valueOf(await remote.recordControl(sessionId, { scopeId: scope.scopeId, action: recordAction })), scope, `recording_${recordAction}`); remember(result); return result })) } catch (error) { if (active()) setNotice(`录制响应未确认：${errorText(error)}；不重发。`) }
       } }, '执行固定范围录制动作'),
       React.createElement('label', null, React.createElement('input', { type: 'checkbox', 'aria-label': '确认解除整个固定范围引用', disabled: busy || working || scope.state !== 'active', checked: releaseConfirmation === scopeToken && intents.current.release === scopeToken, onChange: (event: React.ChangeEvent<HTMLInputElement>) => { intents.current.release = event.target.checked ? scopeToken : ''; setReleaseConfirmation(intents.current.release) } }), '确认解除整个固定范围引用；不发送 Stop、不断连、不证明设备停止'),
       React.createElement('button', { disabled: busy || working || scope.state !== 'active' || releaseConfirmation !== scopeToken || intents.current.release !== scopeToken, onClick: async () => {

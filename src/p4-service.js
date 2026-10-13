@@ -22,14 +22,14 @@ const target = (instanceId, b) => ({ instanceId, bindingId: b.binding_id, target
 const err = e => ({ code: typeof e.code === 'string' ? e.code : 'backend_error', message: e.message })
 const knownRejection = new Set(['permission_denied', 'invalid_request', 'binding_stale', 'identity_changed', 'instance_mismatch', 'request_id_expired', 'reservation_busy', 'operation_capacity', 'unsupported', 'busy', 'not_found', 'permission_conflict'])
 /** Fixed scopes have their own observer leases; ordinary selection never replaces their members. */
-export function createP4Service({ mode, session, attach, http, currentInstance = () => undefined, busy = () => false, schedule = setTimeout, clear = clearTimeout }) {
+export function createP4Service({ mode, session, attach, http, currentInstance = () => undefined, busy = () => false, schedule = setTimeout, clear = clearTimeout, recoveryJournal }) {
   const contexts = new Map(), scopes = new Map(), trials = new Map(), originals = new Map()
   let disposed = false
   const requireActive = () => { if (disposed) fail('disposed', '插件引用已释放，不提交新的授权或控制操作。') }
   function context(s) { session(s); if (!contexts.has(s)) contexts.set(s, { candidates: new Map(), scopes: [], activeScopeId: null }); return contexts.get(s) }
   async function ready(s, capability) { context(s); if (disposed) fail('disposed', '控制引用已释放。'); if (mode !== 'service-v2') fail('unsupported', '控制需要 service-v2。'); const d = await attach(); requireActive(); if (capability && !d.capabilities.includes(capability)) fail('unsupported', `服务未发布 ${capability}；不执行设备动作。`); return d }
   function registered(s, id) { const value = scopes.get(id); if (!value || value.sessionId !== s) fail('not_found', '当前对话未登记该固定控制范围。'); return value }
-  function view(value) { return structuredClone({ scopeId: value.id, instanceId: value.instanceId, members: value.members.map(m => ({ target: target(value.instanceId, m.binding), grantId: m.grantId })), kind: value.members.length === 1 ? 'single' : 'group', state: value.state, controlReady: value.controlReady, controlGranted: value.controlGranted !== false, reason: value.reason, stopAvailable: value.stopAvailable, stopReason: value.stopReason, latest: value.latest, lastOrdinary: value.lastOrdinary ?? null, trial: value.trial, recordings: value.recordings }) }
+  function view(value) { return structuredClone({ scopeId: value.id, instanceId: value.instanceId, members: value.members.map(m => ({ target: target(value.instanceId, m.binding), grantId: m.grantId, controlEpoch: m.controlEpoch, stopRequestId: m.stopRequestId })), kind: value.members.length === 1 ? 'single' : 'group', state: value.state, controlReady: value.controlReady, controlGranted: value.controlGranted !== false, reason: value.reason, stopAvailable: value.stopAvailable, stopReason: value.stopReason, latest: value.latest, lastOrdinary: value.lastOrdinary ?? null, trial: value.trial, recordings: value.recordings }) }
   function renew(scope, delay = 30000) {
     if (disposed || scope.observerReleased || scope.state === 'expired') return
     scope.timer = schedule(async () => {
@@ -85,21 +85,39 @@ export function createP4Service({ mode, session, attach, http, currentInstance =
     try { await scopeReady(s, scopeId, wireAction === 'trials' || wireAction === 'trials/target' ? 'trials' : wireAction.startsWith('recording/') ? 'recording_write' : 'control'); if (scope.flight || busy()) fail('busy', '普通操作正在处理；固定范围 Stop 不受此门禁影响。') }
     catch (e) { return notSent(e) }
     scope.flight = true
+    let recoveryRecordId = null
+    const finish = async value => {
+      if (recoveryRecordId) try { await recoveryJournal.complete(s, recoveryRecordId, value) } catch { /* The durable intent remains pending; history reports the receipt update error. */ }
+      return value
+    }
     try {
       let tickets
       try { tickets = await issue(scope); if (disposed) fail('disposed', '插件引用已释放，不提交新操作。') }
       catch (e) { return notSent(e) }
+      try {
+        if (!recoveryJournal) fail('recovery_unavailable', 'Host 持久恢复索引不可用；普通操作未提交。')
+        const members = scope.members.map((m, i) => ({ target: target(scope.instanceId, m.binding), controlEpoch: m.controlEpoch, stopRequestId: m.stopRequestId, grantId: m.grantId, reservationId: scope.reservationId, operationId: tickets[i].operationId }))
+        const original = JSON.stringify(members)
+        recoveryRecordId = await recoveryJournal.prepare(s, { kind: 'control', action, instanceId: scope.instanceId, members })
+        scope.recoveryRecords ??= new Map(); scope.recoveryRecords.set(tickets[0].operationId, recoveryRecordId)
+        requireActive(); await scopeReady(s, scopeId, wireAction === 'trials' || wireAction === 'trials/target' ? 'trials' : wireAction.startsWith('recording/') ? 'recording_write' : 'control')
+        if (original !== JSON.stringify(scope.members.map((m, i) => ({ target: target(scope.instanceId, m.binding), controlEpoch: m.controlEpoch, stopRequestId: m.stopRequestId, grantId: m.grantId, reservationId: scope.reservationId, operationId: tickets[i].operationId })))) fail('binding_stale', '持久登记期间原固定范围身份或授权变化；普通操作未提交。')
+      } catch (e) {
+        const value = notSent(e)
+        if (recoveryRecordId) await finish({ ...value, results: value.results.map((r, i) => ({ ...r, operationId: tickets[i].operationId })) })
+        return value
+      }
       provisional(scope, action, tickets)
       let value
       try {
         if (scope.groupId) {
           value = await scope.client.groupSubmit(scope.instanceId, scope.groupId, { claimantId: s, action: wireAction, requests: scope.members.map((m, i) => ({ bindingId: m.binding.binding_id, operationId: tickets[i].operationId, ...data(m, i) })) })
-          return result(scope, action, scope.members.map((m, i) => projectAttempt(scope, m, value.members.find(item => item.bindingId === m.binding.binding_id), tickets[i], action)))
+          return finish(result(scope, action, scope.members.map((m, i) => projectAttempt(scope, m, value.members.find(item => item.bindingId === m.binding.binding_id), tickets[i], action))))
         }
         const m = scope.members[0], intent = { claimantId: s, reservationId: scope.reservationId, operationId: tickets[0].operationId, controlEpoch: m.controlEpoch, ...data(m, 0) }
         value = wireAction === 'controls' ? await scope.client.controlCommand(m.binding, intent) : wireAction === 'trials' ? await scope.client.startTrial(m.binding, intent) : wireAction === 'trials/target' ? await scope.client.updateTrial(m.binding, intent) : await scope.client.recordingAction(m.binding, { ...intent, action: wireAction.split('/')[1] })
-        return result(scope, action, [project(scope, m, value)], { newSubmission: value.newSubmission })
-      } catch (e) { return lost(scope, action, tickets, e) }
+        return finish(result(scope, action, [project(scope, m, value)], { newSubmission: value.newSubmission }))
+      } catch (e) { return finish(lost(scope, action, tickets, e)) }
     } finally { scope.flight = false }
   }
   async function refreshScope(scope) {
@@ -118,6 +136,8 @@ export function createP4Service({ mode, session, attach, http, currentInstance =
     }
     if (scope.latest !== original) return
     const next = result(scope, original.action, refreshed, { newSubmission: false })
+    const recoveryRecordId = original.action !== 'stop' && scope.recoveryRecords?.get(original.results[0]?.operationId)
+    if (recoveryRecordId) try { await recoveryJournal.complete(scope.sessionId, recoveryRecordId, next) } catch { /* History retains the original intent and reports update failure. */ }
     if (scope.stopResult?.results.every((r, i) => r.operationId === original.results[i]?.operationId)) scope.stopResult = next
     if (original.results.some(r => r.unknownSource === 'transport') && refreshed.every(r => r.admission === 'finished' && r.submission === 'not_submitted' && !r.unknown) && !scope.stopRequested && scope.state === 'active' && scope.reservationId) { scope.controlReady = true; scope.reason = null }
   }
@@ -319,7 +339,7 @@ export function createP4Service({ mode, session, attach, http, currentInstance =
   }
   function trialView(scope, record, statuses = [], recordingIds = []) {
     const run = record.latest ?? scope.latest
-    const value = { trialId: record.id, members: scope.members.map(m => target(scope.instanceId, m.binding)), mode: record.mode, state: record.released ? 'reference_released' : record.states?.length ? [...new Set(record.states)].join(' / ') : run.results.map(r => r.admission).join(' / '), progress: statuses.length ? statuses : run.results.map(r => r.phase ?? r.admission), results: run.results.map((r, i) => ({ ...record.evidence?.[i], target: r.target, preparation: r.phase ?? r.admission, admission: r.admission, submission: r.submission, observation: r.observation, unknown: r.unknown, nativeJsonText: r.nativeJsonText, operationId: r.operationId, unknownSource: r.unknownSource, controlEffect: r.controlEffect })), unknown: run.unknown, stopAvailable: scope.stopAvailable, recordingIds, ...(typeof run.newSubmission === 'boolean' ? { newSubmission: run.newSubmission } : {}), ...(run.coalescedExisting ? { coalescedExisting: true } : {}) }
+    const value = { trialId: record.id, action: run.action, members: scope.members.map(m => target(scope.instanceId, m.binding)), mode: record.mode, state: record.released ? 'reference_released' : record.states?.length ? [...new Set(record.states)].join(' / ') : run.results.map(r => r.admission).join(' / '), progress: statuses.length ? statuses : run.results.map(r => r.phase ?? r.admission), results: run.results.map((r, i) => ({ ...record.evidence?.[i], target: r.target, preparation: r.phase ?? r.admission, admission: r.admission, submission: r.submission, observation: r.observation, unknown: r.unknown, nativeJsonText: r.nativeJsonText, operationId: r.operationId, unknownSource: r.unknownSource, controlEffect: r.controlEffect })), unknown: run.unknown, stopAvailable: scope.stopAvailable, recordingIds, ...(typeof run.newSubmission === 'boolean' ? { newSubmission: run.newSubmission } : {}), ...(run.coalescedExisting ? { coalescedExisting: true } : {}) }
     scope.trial = value; return structuredClone(value)
   }
   return api

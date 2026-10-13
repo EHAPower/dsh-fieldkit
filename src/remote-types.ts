@@ -142,6 +142,9 @@ export interface FieldkitService {
   createControlScope(sessionId: string, request: FieldkitControlScopeRequest): Promise<FieldkitControlScope>
   selectControlScope(sessionId: string, scopeId: string): Promise<FieldkitControlContext>
   controlContext(sessionId: string): Promise<FieldkitControlContext>
+  forgetRecoveryRecord(sessionId: string, request: FieldkitRecoveryRequest): Promise<FieldkitRecoveryForget>
+  listRecoveryHistory(sessionId: string): Promise<FieldkitRecoveryHistory>
+  readRecoveryRecord(sessionId: string, request: FieldkitRecoveryRequest): Promise<FieldkitRecoveryRecord>
   submitControl(sessionId: string, request: FieldkitControlRequest): Promise<FieldkitControlResult>
   recordControl(sessionId: string, request: FieldkitControlRecordingRequest): Promise<FieldkitControlResult>
   stopControlScope(sessionId: string, scopeId: string): Promise<FieldkitControlResult>
@@ -323,7 +326,7 @@ export interface FieldkitConfigurationRead { readonly view: 'factory' | 'startup
 
 export interface FieldkitControlCandidate { readonly candidateId: string; readonly label: string; readonly targetId: string; readonly instanceId: string; readonly uid: string; readonly runNonce: string; readonly connectionGeneration: string }
 export interface FieldkitControlCandidates { readonly candidates: readonly FieldkitControlCandidate[] }
-export interface FieldkitControlMember { readonly target: FieldkitMaintenanceTarget; readonly grantId: string }
+export interface FieldkitControlMember { readonly target: FieldkitMaintenanceTarget; readonly grantId: string; readonly controlEpoch: string | null; readonly stopRequestId: string | null }
 export interface FieldkitControlMemberResult {
   readonly previousOperationId?: string | null
   readonly previousSubmission?: string
@@ -362,7 +365,7 @@ export interface FieldkitTrialParameters {
 export interface FieldkitTrialStartRequest { readonly scopeId: string; readonly parameters: FieldkitTrialParameters }
 export interface FieldkitTrialUpdateRequest { readonly trialId: string; readonly positionRaw: string }
 export interface FieldkitTrialMemberResult { readonly trialState?: string; readonly stopObserved?: boolean; readonly stopConfirmationOverdue?: boolean; readonly elapsedMs?: string | null; readonly trialNativeJsonText?: string; readonly operationId?: string | null; readonly unknownSource?: 'transport' | 'sdk' | null; readonly controlEffect?: string | null; readonly target: FieldkitMaintenanceTarget; readonly preparation: string; readonly admission: string; readonly submission: string; readonly observation: string | null; readonly unknown: boolean; readonly nativeJsonText?: string | null }
-export interface FieldkitTrialReceipt { readonly trialId: string | null; readonly members: readonly FieldkitMaintenanceTarget[]; readonly mode: 'position' | 'velocity' | 'force' | 'impedance'; readonly state: string; readonly progress: readonly string[]; readonly results: readonly FieldkitTrialMemberResult[]; readonly unknown: boolean; readonly stopAvailable: boolean; readonly recordingIds: readonly string[]; readonly newSubmission?: boolean; readonly coalescedExisting?: boolean }
+export interface FieldkitTrialReceipt { readonly action?: string; readonly trialId: string | null; readonly members: readonly FieldkitMaintenanceTarget[]; readonly mode: 'position' | 'velocity' | 'force' | 'impedance'; readonly state: string; readonly progress: readonly string[]; readonly results: readonly FieldkitTrialMemberResult[]; readonly unknown: boolean; readonly stopAvailable: boolean; readonly recordingIds: readonly string[]; readonly newSubmission?: boolean; readonly coalescedExisting?: boolean }
 
 export interface FieldkitOriginalStopScope { readonly referenceId: string; readonly targetId: string; readonly uid: string; readonly runNonce: string; readonly connectionGeneration: string; readonly controlEpoch: string; readonly instanceId: string; readonly current: boolean; readonly controlGranted: boolean; readonly stopRequestId: string }
 export interface FieldkitOriginalStopScopes { readonly scopes: readonly FieldkitOriginalStopScope[] }
@@ -370,3 +373,10 @@ export interface FieldkitOriginalStopResult { readonly action?: string; readonly
 
 export interface FieldkitOriginalCleanupRequest { readonly referenceId: string; readonly action: 'heartbeat_stop' | 'recording_stop' }
 export interface FieldkitOriginalOperationRequest { readonly referenceId: string; readonly operationId: string; readonly action?: 'stop' | 'heartbeat_stop' | 'recording_stop' }
+
+export interface FieldkitRecoveryMember { readonly target: FieldkitMaintenanceTarget; readonly controlEpoch: string | null; readonly stopRequestId: string | null }
+export interface FieldkitRecoveryRecord { readonly recordId: string; readonly source: 'host' | 'browser'; readonly kind: string; readonly action: string; readonly instanceId: string; readonly members: readonly FieldkitRecoveryMember[]; readonly operationIds: readonly string[]; readonly result: FieldkitControlResult | null; readonly pending: boolean; readonly recoveryError: FieldkitMaintenanceError | null }
+export interface FieldkitRecoveryHistory { readonly records: readonly FieldkitRecoveryRecord[] }
+export interface FieldkitRecoveryRequest { readonly recordId: string }
+
+export interface FieldkitRecoveryForget { readonly forgotten: true; readonly recordId: string }

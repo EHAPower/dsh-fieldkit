@@ -1,3 +1,4 @@
+import type { FieldkitRecoveryHistory, FieldkitRecoveryRequest, FieldkitRecoveryRecord, FieldkitRecoveryForget } from './remote-types.js'
 import type { FieldkitOriginalCleanupRequest, FieldkitOriginalOperationRequest } from './remote-types.js'
 import type { FieldkitControlCandidates, FieldkitControlContext, FieldkitControlRecordingRequest, FieldkitControlRequest, FieldkitControlResult, FieldkitControlScope, FieldkitControlScopeRequest, FieldkitOriginalStopResult, FieldkitOriginalStopScopes, FieldkitTrialReceipt, FieldkitTrialStartRequest, FieldkitTrialUpdateRequest } from './remote-types.js'
 import type { FieldkitConfigurationSchema, FieldkitConfigurationValidation, FieldkitConfigurationReadRequest, FieldkitConfigurationRead, FieldkitMaintenanceContext, FieldkitMaintenancePermissionRequest, FieldkitMaintenanceGrant, FieldkitMaintenanceRequest, FieldkitMaintenanceReceipt } from './remote-types.js'
@@ -173,6 +174,13 @@ export class FieldkitRemote extends TypertRemoteService {
 
   @Remote('listAdapters')
   listAdapters(sessionId: string): Promise<FieldkitJob> { return Promise.resolve().then(() => this.ctx.fieldkit.listAdapters(sessionId)).catch(fieldkitRemoteFailure) }
+
+  @Remote('forgetRecoveryRecord')
+  forgetRecoveryRecord(sessionId: string, request: FieldkitRecoveryRequest): Promise<FieldkitRecoveryForget> { return Promise.resolve().then(() => this.ctx.fieldkit.forgetRecoveryRecord(sessionId, request)).catch(fieldkitRemoteFailure) }
+  @Remote('listRecoveryHistory')
+  listRecoveryHistory(sessionId: string): Promise<FieldkitRecoveryHistory> { return Promise.resolve().then(() => this.ctx.fieldkit.listRecoveryHistory(sessionId)).catch(fieldkitRemoteFailure) }
+  @Remote('readRecoveryRecord')
+  readRecoveryRecord(sessionId: string, request: FieldkitRecoveryRequest): Promise<FieldkitRecoveryRecord> { return Promise.resolve().then(() => this.ctx.fieldkit.readRecoveryRecord(sessionId, request)).catch(fieldkitRemoteFailure) }
 
   @Remote('listRecordings')
   listRecordings(sessionId: string): Promise<FieldkitJob> { return Promise.resolve().then(() => this.ctx.fieldkit.listRecordings(sessionId)).catch(fieldkitRemoteFailure) }

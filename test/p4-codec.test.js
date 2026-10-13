@@ -8,8 +8,8 @@ const native = '{"n":18446744073709551615,"v":0.12345678901234567890123456789,"v
 const member = { target, operationId: 'op', admission: 'finished', submission: 'unknown', controlEffect: 'unresolved', observation: 'unconfirmed', phase: 'submission', unknown: true, unknownSource: 'sdk', nativeJsonText: native, error: { code: 'unknown', message: 'preserved' }, stopAttemptDelayMs: '18446744073709551615', trialId: 'trial', recordingId: 'record', previousOperationId: 'old', previousSubmission: 'unknown', previousUnknown: true, previousNativeJsonText: native }
 const result = { scopeId: 'scope', action: 'position', results: [member], unknown: true, newSubmission: false, coalescedExisting: false }
 const trialMember = { target, operationId: 'op', unknownSource: 'sdk', controlEffect: 'unresolved', preparation: 'submission', admission: 'finished', submission: 'unknown', observation: 'unconfirmed', unknown: true, nativeJsonText: native, trialState: 'active', stopObserved: false, stopConfirmationOverdue: true, elapsedMs: '18446744073709551615', trialNativeJsonText: native }
-const trial = { trialId: 'host-trial', members: [target], mode: 'position', state: 'active', progress: ['SDK'], results: [trialMember], unknown: true, stopAvailable: true, recordingIds: ['rec'], newSubmission: false, coalescedExisting: true }
-const scope = { scopeId: 'scope', instanceId: 'i', members: [{ target, grantId: 'grant' }], kind: 'single', state: 'active', controlReady: false, reason: 'unknown', stopAvailable: true, stopReason: null, latest: result, lastOrdinary: result, trial, recordings: [{ target, active: true, failed: false, recordingId: 'rec', nativeJsonText: native, error: null }] }
+const trial = { action: 'trial_start', trialId: 'host-trial', members: [target], mode: 'position', state: 'active', progress: ['SDK'], results: [trialMember], unknown: true, stopAvailable: true, recordingIds: ['rec'], newSubmission: false, coalescedExisting: true }
+const scope = { scopeId: 'scope', instanceId: 'i', members: [{ target, grantId: 'grant', controlEpoch: '18446744073709551615', stopRequestId: 'canonical' }], kind: 'single', state: 'active', controlReady: false, reason: 'unknown', stopAvailable: true, stopReason: null, latest: result, lastOrdinary: result, trial, recordings: [{ target, active: true, failed: false, recordingId: 'rec', nativeJsonText: native, error: null }] }
 test('generated P4 codecs retain fixed membership, partial previous evidence, precise trial/recording and unknown provenance', () => {
   for (const name of ['submitControl', 'recordControl', 'stopControlScope']) assert.deepEqual(parse(name, result), result)
   for (const name of ['createControlScope', 'releaseControlScope', 'revokeControlScope']) assert.deepEqual(parse(name, scope), scope)
@@ -35,4 +35,17 @@ test('generated P4 arguments require raw string numbers and fixed actions', () =
   const cleanup = descriptor('cleanupOriginalScope').parameters[1].codec.create()
   assert.equal(cleanup.safeParse({ referenceId: 'r', action: 'recording_stop' }).success, true)
   assert.equal(cleanup.safeParse({ referenceId: 'r', action: 'heartbeat_start' }).success, false)
+})
+
+test('generated recovery history codecs preserve original instance, epoch, canonical IDs and exact evidence without execution authority', () => {
+  const record = { recordId: 'record', source: 'host', kind: 'control', action: 'position', instanceId: 'i', members: [{ target, controlEpoch: '18446744073709551615', stopRequestId: 'canonical' }], operationIds: ['op'], result, pending: true, recoveryError: { code: 'recovery_write_failed', message: 'original intent retained' } }
+  assert.deepEqual(parse('listRecoveryHistory', { records: [record] }), { records: [record] })
+  assert.deepEqual(parse('readRecoveryRecord', record), record)
+  const request = descriptor('readRecoveryRecord').parameters[1].codec.create()
+  assert.deepEqual(request.parse({ recordId: 'record' }), { recordId: 'record' })
+})
+
+test('generated recovery forget codec keeps only the explicit local record reference', () => {
+  assert.deepEqual(parse('forgetRecoveryRecord', { forgotten: true, recordId: 'record-001.identity' }), { forgotten: true, recordId: 'record-001.identity' })
+  assert.deepEqual(descriptor('forgetRecoveryRecord').parameters[1].codec.create().parse({ recordId: 'record-001.identity' }), { recordId: 'record-001.identity' })
 })
