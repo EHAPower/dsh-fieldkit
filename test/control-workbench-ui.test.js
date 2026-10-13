@@ -673,3 +673,17 @@ test('native recording error guidance uses structured action or phase in current
     assert.match(allText(history), /Permission denied \(os error 13\)/)
   }
 })
+
+test('group Busy creation distinguishes registered observers from ordinary control readiness and keeps Stop available', async () => {
+  const fixed = { ...scope([first, second]), controlReady: false, reason: '普通控制占用未取得：busy；保留原成员，不自动重试。' }
+  const remote = baseRemote(null, { createControlScope: async () => { remote.controlContext = async () => success({ scopes: [fixed], activeScopeId: fixed.scopeId, capabilities: caps }); return success(fixed) } })
+  const ui = mount(remote); await ui.settle()
+  ui.change('控制候选 c1', true); ui.change('控制候选 c2', true); ui.change('确认全部所选成员并授权固定控制范围', true)
+  await ui.button('建立固定控制范围').props.onClick(); ui.render()
+  assert.doesNotMatch(allText(ui), /固定控制范围已建立/)
+  assert.match(allText(ui), /普通控制占用未取得/); assert.match(allText(ui), /busy/)
+  assert.match(allText(ui), /观察引用 active/)
+  assert.equal(ui.button('提交群组持续目标').props.disabled, true)
+  const bar = mount(null, { stopBar: true, fixedScope: fixed, busy: true, onStop: async () => success(result(fixed, 'stop')) })
+  assert.equal(bar.button('停止固定控制范围').props.disabled, false)
+})

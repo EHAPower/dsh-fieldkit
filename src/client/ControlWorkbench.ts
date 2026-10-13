@@ -291,7 +291,7 @@ export function ControlWorkbench({ remote, sessionId, currentBinding, busy, visi
     confirmed.current.token = ''; setConfirmation('')
     try { await ordinary(async () => {
       const fixed: FieldkitControlScope = valueOf(await remote.createControlScope(sessionId, { candidateIds: chosen.map(candidate => candidate.candidateId) }))
-      if (active()) { publish({ ...context, scopes: [...context.scopes.filter(item => item.scopeId !== fixed.scopeId), fixed], activeScopeId: fixed.scopeId }); setNotice('固定控制范围已建立；没有自动提交目标或启动心跳。') }
+      if (active()) { publish({ ...context, scopes: [...context.scopes.filter(item => item.scopeId !== fixed.scopeId), fixed], activeScopeId: fixed.scopeId }); setNotice(fixed.controlReady ? '固定控制范围已建立；没有自动提交目标或启动心跳。' : `原成员已登记，普通控制不可用：${fixed.reason ?? '请核对原范围。'}；${fixed.stopAvailable ? '全部原成员 Stop 独立可用。' : fixed.stopReason ?? '原范围 Stop 尚不可用。'}`) }
     }) } catch (error) { if (active()) setNotice(`控制范围建立未确认：${errorText(error)}；不自动重试。`) }
   }
   const original = (fixed: FieldkitControlScope) => { if (!active() || !context.scopes.some(item => fixedKey(item) === fixedKey(fixed))) throw new Error('原固定控制范围已变化；不提交新动作。') }
@@ -357,7 +357,7 @@ export function ControlWorkbench({ remote, sessionId, currentBinding, busy, visi
     React.createElement('section', { style: styles.card }, React.createElement('h2', null, '固定控制范围'),
       React.createElement('p', null, `当前观察：${currentBinding?.targetId ?? '无'}。观察对象与固定执行范围独立；切页和选择新观察对象不切换控制成员。`),
       context.scopes.length > 1 && React.createElement('label', null, '明确选择已登记原控制范围 ', React.createElement('select', { value: context.activeScopeId ?? '', onChange: async (event: React.ChangeEvent<HTMLSelectElement>) => { const id = event.target.value; try { publish(valueOf(await remote.selectControlScope(sessionId, id))) } catch (error) { if (active()) setNotice(errorText(error)) } } }, context.scopes.map(item => React.createElement('option', { key: item.scopeId, value: item.scopeId }, `${item.scopeId} · ${membersText(item)} · ${item.state}`)))),
-      scope && React.createElement('p', null, `固定范围 ${scope.scopeId}：${membersText(scope)} · ${scope.state}`),
+      scope && React.createElement('p', null, `固定范围 ${scope.scopeId}：${membersText(scope)} · 观察引用 ${scope.state} · 普通控制 ${scope.controlReady ? '可用' : '不可用'}`),
       React.createElement('button', { disabled: busy || working, onClick: async () => { try { await ordinary(() => refresh(true)) } catch (error) { if (active()) setMetadataNotice(`控制元数据读取失败：${errorText(error)}；保留原范围。`) } } }, '刷新控制候选与范围'),
       data.candidates.map(candidate => React.createElement('label', { key: candidate.candidateId, style: { display: 'block' } }, React.createElement('input', { type: 'checkbox', 'aria-label': `控制候选 ${candidate.candidateId}`, checked: selected.includes(candidate.candidateId), disabled: busy || working, onChange: (event: React.ChangeEvent<HTMLInputElement>) => setSelected(event.target.checked ? [...selected.filter(id => id !== candidate.candidateId), candidate.candidateId] : selected.filter(id => id !== candidate.candidateId)) }), `${candidate.label} · UID ${candidate.uid} · run_nonce ${candidate.runNonce} · 代次 ${candidate.connectionGeneration} · 实例 ${candidate.instanceId}`)),
       createReason && React.createElement('p', { role: 'status' }, createReason),

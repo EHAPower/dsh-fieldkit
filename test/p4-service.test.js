@@ -383,3 +383,52 @@ test('released scope revoke refuses changed identity grant epoch or canonical St
     assert.equal(x.calls.filter(c => c[0] === 'detach').length, 2, fault)
   }
 })
+
+test('group reservation Busy keeps every granted canonical Stop usable and retains per-member failure without re-POST', async () => {
+  for (const released of [false, true]) {
+    const x = setup(); x.client.createControlGroup = async () => { throw error('busy') }
+    const { candidates } = await x.service.controlCandidates('chat')
+    const fixed = await x.service.createControlScope('chat', { candidateIds: candidates.map(c => c.candidateId) })
+    assert.equal(fixed.controlReady, false); assert.equal(fixed.stopAvailable, true)
+    assert.equal(fixed.members.length, 2); assert.match(fixed.reason, /busy/)
+    const denied = await x.service.submitControl('chat', { scopeId: fixed.scopeId, command: { action: 'heartbeat_once' } })
+    assert.equal(denied.results.every(r => r.submission === 'not_submitted'), true)
+    if (released) await x.service.releaseControlScope('chat', fixed.scopeId)
+    const attempts = []
+    const operation = async (b, intent) => { attempts.push({ target: b.target_id, id: intent.operationId }); if (b.target_id === 'usb') throw error('sdk_timeout'); return x.receipt(b, { ...intent, claimantId: 'other-chat' }, 'stop') }
+    x.client.stop = operation
+    x.client.stopControlOriginalScope = async (_instance, id, intent) => operation({ target_id: intent.expectedScope.targetId, identity: { uid: intent.expectedScope.identity.uid, run_nonce: intent.expectedScope.identity.runNonce } }, { operationId: id, claimantId: intent.claimantId })
+    const stopped = await x.service.stopControlScope('chat', fixed.scopeId)
+    assert.deepEqual(attempts, [{ target: 'usb', id: 'stop-b0' }, { target: 'can:1', id: 'stop-b1' }])
+    assert.equal(stopped.results.length, 2)
+    assert.equal(stopped.results[0].unknownSource, 'transport'); assert.equal(stopped.results[0].operationId, 'stop-b0')
+    assert.equal(stopped.results[1].submission, 'locally_submitted'); assert.equal(stopped.results[1].operationId, 'stop-b1')
+    assert.equal(stopped.unknown, true)
+    await x.service.stopControlScope('chat', fixed.scopeId)
+    assert.equal(attempts.length, 2, 'known original canonical requests are never POSTed again')
+    assert.equal(x.calls.some(call => call[0] === 'command'), false)
+  }
+})
+
+test('late single or group reservation success cannot reopen ordinary control after an independent Stop', async () => {
+  for (const grouped of [false, true]) {
+    const x = setup(); let complete
+    if (grouped) x.client.createControlGroup = async (_instance, bindings) => new Promise(resolve => { complete = () => resolve({ groupId: 'late-group', reservationId: 'late-r', stopRequestId: 'late-group-stop', members: bindings.map(b => ({ bindingId: b.binding_id, controlEpoch: '1', stopRequestId: `stop-${b.binding_id}` })) }) })
+    else x.client.controlReservation = async () => new Promise(resolve => { complete = () => resolve({ reservationId: 'late-r', controlEpoch: '1' }) })
+    const { candidates } = await x.service.controlCandidates('chat')
+    const opening = x.service.createControlScope('chat', { candidateIds: candidates.slice(0, grouped ? 2 : 1).map(c => c.candidateId) })
+    await new Promise(resolve => setImmediate(resolve))
+    const during = (await x.service.controlContext('chat')).scopes[0]
+    assert.equal(during.stopAvailable, true)
+    await x.service.stopControlScope('chat', during.scopeId)
+    complete(); const finished = await opening
+    assert.equal(finished.controlReady, false)
+    assert.match(finished.reason, /已请求原范围 Stop/)
+    assert.equal(finished.latest.action, 'stop')
+    const refused = await x.service.submitControl('chat', { scopeId: during.scopeId, command: { action: 'heartbeat_once' } })
+    assert.equal(refused.results.every(member => member.error.code === 'permission_denied' && member.submission === 'not_submitted'), true)
+    assert.equal(x.calls.some(call => call[0] === 'command'), false)
+    await x.service.stopControlScope('chat', during.scopeId)
+    assert.equal(x.calls.filter(call => call[0] === 'stop').length, grouped ? 2 : 1)
+  }
+})

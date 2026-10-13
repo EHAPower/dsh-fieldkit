@@ -50,7 +50,7 @@ export function createP4Service({ mode, session, attach, http, currentInstance =
     if (disposed) fail('disposed', '控制引用已释放。')
     const instanceId = stop ? currentInstance() ?? scope.instanceId : (await ready(s, capability)).instance_id
     if (scope.instanceId !== instanceId) { await expireScope(scope, '原控制范围属于旧服务实例，不能向新实例重发。'); fail('instance_mismatch', scope.reason) }
-    if (!stop && (!scope.controlReady || scope.state !== 'active')) fail('permission_denied', scope.reason ?? '原控制范围不可提交新目标。')
+    if (!stop && (scope.stopRequested || !scope.controlReady || scope.state !== 'active')) fail('permission_denied', scope.reason ?? '原控制范围不可提交新目标。')
     return scope
   }
   function project(scope, member, operation, error = null) {
@@ -244,19 +244,21 @@ export function createP4Service({ mode, session, attach, http, currentInstance =
         }
         if (disposed) fail('disposed', '插件引用已释放，不创建控制范围。')
         scopes.set(scope.id, scope); c.scopes.push(scope.id); c.activeScopeId = scope.id
+        scope.stopAvailable = scope.members.every(m => m.grantId && m.controlEpoch && m.stopRequestId)
+        scope.stopReason = scope.stopAvailable ? null : scope.stopReason
         if (scope.members.length === 1) {
           scope.stopRequestId = scope.members[0].stopRequestId; scope.stopAvailable = !!scope.stopRequestId; scope.stopReason = scope.stopAvailable ? null : scope.stopReason
-          try { const r = await scope.client.controlReservation(scope.members[0].binding, s); scope.reservationId = r.reservationId; scope.members[0].controlEpoch = r.controlEpoch; requireActive(); scope.controlReady = true }
+          try { const r = await scope.client.controlReservation(scope.members[0].binding, s); scope.reservationId = r.reservationId; scope.members[0].controlEpoch = r.controlEpoch; requireActive(); scope.controlReady = !scope.stopRequested }
           catch (e) { if (disposed) throw e; scope.reason = `普通控制占用未取得：${e.message}；已授权的原范围 Stop 独立可用。` }
         } else {
           const group = await scope.client.createControlGroup(scope.instanceId, scope.members.map(m => m.binding), s)
           scope.groupId = group.groupId; scope.reservationId = group.reservationId; scope.stopRequestId = group.stopRequestId
           for (const m of scope.members) { const saved = group.members.find(v => v.bindingId === m.binding.binding_id); if (!saved) fail('invalid_response', '服务群组遗漏原成员。'); m.controlEpoch = saved.controlEpoch; m.stopRequestId = saved.stopRequestId }
-          requireActive(); scope.controlReady = true; scope.stopAvailable = true; scope.stopReason = null
+          requireActive(); scope.controlReady = !scope.stopRequested; scope.stopAvailable = true; scope.stopReason = null
         }
         renew(scope); return view(scope)
       } catch (e) {
-        if (scopes.has(scope.id)) { if (disposed) { await expireScope(scope, '插件已解除观察引用；保留已返回授权和占用事实，不发送新动作。'); throw e } scope.reason = `固定范围建立未完成：${e.message}；保留原成员，不自动重试。`; renew(scope); return view(scope) }
+        if (scopes.has(scope.id)) { if (disposed) { await expireScope(scope, '插件已解除观察引用；保留已返回授权和占用事实，不发送新动作。'); throw e } scope.reason = `普通控制占用未取得：${e.code ?? 'backend_error'} ${e.message}；保留原成员，不自动重试。${scope.stopAvailable ? '已授权的全部原成员 Stop 独立可用。' : ''}`; renew(scope); return view(scope) }
         await Promise.allSettled(scope.members.map(m => scope.client.detach(m.binding)))
         if (scope.members.some(m => m.grantId)) e.message = `完整控制范围未建立；${scope.members.filter(m => m.grantId).map(m => m.binding.target_id).join('、')} 已取得 control 授权，可显式读取原执行范围核对；没有提交目标或 Stop。${e.message}`
         throw e
@@ -277,6 +279,22 @@ export function createP4Service({ mode, session, attach, http, currentInstance =
         provisional(scope, 'stop', tickets)
         try {
           if (scope.groupId) { const v = await scope.client.stopGroup(scope.instanceId, scope.groupId, { claimantId: s, operationId: scope.stopRequestId, controlEpoch: scope.members[0].controlEpoch }); scope.stopResult = result(scope, 'stop', scope.members.map(m => { const item = v.members.find(v => v.bindingId === m.binding.binding_id); if (!item) fail('invalid_response', 'Stop 回执遗漏固定成员。'); return projectAttempt(scope, m, item, { operationId: m.stopRequestId }, 'stop') })) }
+          else if (scope.members.length > 1) {
+            // A refused group reservation has no SDK group ID. Stop still covers
+            // every originally confirmed member using its preallocated ID.
+            const results = await Promise.all(scope.members.map(async m => {
+              try {
+                const value = scope.observerReleased
+                  ? await scope.client.stopControlOriginalScope(scope.instanceId, m.stopRequestId, { claimantId: s, expectedScope: { targetId: m.binding.target_id, identity: { uid: m.binding.identity.uid, runNonce: m.binding.identity.run_nonce }, connectionGeneration: m.binding.connection_generation, controlEpoch: m.controlEpoch } })
+                  : await scope.client.stop(m.binding, { claimantId: s, operationId: m.stopRequestId, controlEpoch: m.controlEpoch })
+                return project(scope, m, value)
+              } catch (e) {
+                const rejected = knownRejection.has(e.code)
+                return { ...project(scope, m, null, err(e)), operationId: m.stopRequestId, admission: rejected ? 'finished' : 'unknown', submission: rejected ? 'not_submitted' : 'unknown', controlEffect: rejected ? 'not_attempted' : 'unresolved', unknown: !rejected, unknownSource: rejected ? null : 'transport' }
+              }
+            }))
+            scope.stopResult = result(scope, 'stop', results)
+          }
           else { const m = scope.members[0]; const value = scope.observerReleased ? await scope.client.stopControlOriginalScope(scope.instanceId, scope.stopRequestId, { claimantId: s, expectedScope: { targetId: m.binding.target_id, identity: { uid: m.binding.identity.uid, runNonce: m.binding.identity.run_nonce }, connectionGeneration: m.binding.connection_generation, controlEpoch: m.controlEpoch } }) : await scope.client.stop(m.binding, { claimantId: s, operationId: scope.stopRequestId, controlEpoch: m.controlEpoch }); scope.stopResult = result(scope, 'stop', [project(scope, scope.members[0], value)], { newSubmission: value.newSubmission }) }
         } catch (e) { scope.stopResult = lost(scope, 'stop', tickets, e) }
         return structuredClone(scope.stopResult)
