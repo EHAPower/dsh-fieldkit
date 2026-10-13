@@ -1,3 +1,6 @@
+import { createSnapshotTool } from './snapshot-tools.js'
+import { createControlTools } from './control-tools.js'
+import { createMaintenanceTools } from './maintenance-tools.js'
 import { readFileSync } from 'node:fs'
 import Schema from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -50,11 +53,15 @@ export function apply(ctx, config = {}) {
   ctx.plugin(FieldkitRemote)
   ctx.on('dispose', () => service.dispose())
   const legacy = (config.deviceMode ?? 'service-v2') === 'legacy-cli'
+  const snapshotTool = createSnapshotTool(service, config.deviceMode ?? 'service-v2')
   const diagnosisName = legacy ? 'fieldkit_diagnose_usb' : 'fieldkit_diagnose'
-  const allowedTools = new Set(['fieldkit_devices', diagnosisName, 'fieldkit_check_configuration', 'skill', 'ask_user_question', 'present'])
+  const maintenanceTools = (config.deviceMode ?? 'service-v2') === 'service-v2' ? createMaintenanceTools(service) : []
+  const controlTools = (config.deviceMode ?? 'service-v2') === 'service-v2' ? createControlTools(service) : []
+  const maintenanceNames = [...maintenanceTools, ...controlTools].map(tool => tool.name)
+  const allowedTools = new Set([...maintenanceNames, 'fieldkit_snapshot', 'fieldkit_devices', diagnosisName, 'fieldkit_check_configuration', 'skill', 'ask_user_question', 'present'])
   ctx.tools.guard(execution => {
-    if (!allowedTools.has(execution.name)) return 'Fieldkit permits only its public read-only workflows'
-    if (['fieldkit_devices', diagnosisName].includes(execution.name) && !execution.agent?.id) return 'Device tools require a trusted current DSH session'
+    if (!allowedTools.has(execution.name)) return 'Fieldkit permits only fixed public workflows and explicitly human-granted scopes'
+    if (['fieldkit_devices', 'fieldkit_snapshot', diagnosisName, ...maintenanceNames].includes(execution.name) && !execution.agent?.id) return 'Device tools require a trusted current DSH session'
     if (execution.name === 'skill' && !skillNames.includes(execution.arguments?.name)) return 'Only bundled Fieldkit skills are permitted'
     if (execution.name === 'present' && (!Array.isArray(execution.arguments?.files) || execution.arguments.files.some(file => !service.hasReport(execution.agent?.id, file?.path)))) return 'Only reports belonging to this DSH session may be presented'
   })
@@ -91,7 +98,9 @@ export function apply(ctx, config = {}) {
   ctx.tools.register(defineTool({
     name: 'fieldkit_check_configuration',
     description: 'Run official offline config-check on a full configuration record. Supply original JSON text to preserve large numbers and formatting. Static validity does not certify safe motion.',
-    parameters: { record: { type: 'json', required: true, description: 'Complete original JSON text (preferred), or a JSON record. No patch or arbitrary file path.' } }, output,
-    async execute(args, exec) { return service.checkConfiguration(args.record, exec?.signal) },
+    parameters: { record: { type: 'string', required: true, description: 'Complete original JSON text; preserve all numbers, duplicate keys and formatting. No parsed record, patch or arbitrary file path.' } }, output,
+    async execute(args, exec) { if (typeof args.record !== 'string') throw new TypeError('Complete original configuration text is required'); return service.checkConfiguration(args.record, exec?.signal) },
   }))
+  ctx.tools.register(snapshotTool)
+  for (const tool of [...maintenanceTools, ...controlTools]) ctx.tools.register(tool)
 }

@@ -1,0 +1,179 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { createP4Service } from '../src/p4-service.js'
+const error = code => Object.assign(new Error(code), { code })
+function setup() {
+  const gate = { hold: false }, calls = [], timers = [], bindings = [], descriptions = { instance_id: 'i', capabilities: ['control', 'control_groups', 'trials', 'recording_write', 'control_scopes'] }
+  let serial = 0
+  const receipt = (binding, intent, action) => ({ operationId: intent.operationId, claimantId: intent.claimantId, action, controlEpoch: '1', members: [{ targetId: binding.target_id, identity: { uid: binding.identity.uid, runNonce: binding.identity.run_nonce }, connectionGeneration: '1' }], admission: 'finished', submission: 'locally_submitted', controlEffect: 'known', observation: 'unconfirmed', phase: 'submission', nativeJsonText: '{"n":18446744073709551615}', error: null, newSubmission: true })
+  const client = {
+    targets: async () => ({ instance_id: descriptions.instance_id, targets: ['usb', 'can:1'].map((target_id, i) => ({ target_id, connected: true, can_attach: true, identity: { uid: `u${i}`, run_nonce: 'n' }, connection_generation: '1' })) }),
+    bind: async request => { calls.push(['bind', request]); const b = { ...request, binding_id: `b${bindings.length}`, identity: request.expected_identity }; bindings.push(b); return b },
+    permissionView: async () => ({ maintenance: true, control: false, grantId: 'old' }),
+    controlPermission: async (b, p, cas) => { calls.push(['permission', p, cas]); return { grantId: 'g', controlEpoch: '1', stopRequestId: `stop-${b.binding_id}` } },
+    controlReservation: async () => ({ reservationId: 'r', controlEpoch: '1' }),
+    controlTicket: async () => ({ operationId: `op${++serial}`, controlEpoch: '1' }),
+    controlCommand: async (b, intent) => { calls.push(['command', intent]); return receipt(b, intent, intent.command.action) },
+    stop: async (b, intent) => { calls.push(['stop', intent]); return receipt(b, { ...intent, claimantId: 'another-chat' }, 'stop') },
+    renew: async b => calls.push(['renew', b]), detach: async b => calls.push(['detach', b]),
+    releaseControlReservation: async () => ({ blocked: [] }),
+    controlOperation: async () => { throw error('sdk_timeout') },
+    controlScopes: async () => [{ stopRequestId: 'canonical', scope: { targetId: 'can:1', identity: { uid: 'u1', runNonce: 'n' }, connectionGeneration: '1', controlEpoch: '1' }, current: true, controlGranted: true }],
+    stopControlOriginalScope: async (_i, id, intent) => { calls.push(['original', intent]); return receipt({ target_id: intent.expectedScope.targetId, identity: { uid: intent.expectedScope.identity.uid, run_nonce: intent.expectedScope.identity.runNonce } }, { operationId: id, claimantId: 'other' }, 'stop') },
+  }
+  const service = createP4Service({ mode: 'service-v2', session: s => assert.ok(s), attach: async () => gate.hold ? new Promise(() => {}) : descriptions, currentInstance: () => descriptions.instance_id, http: () => client, schedule: callback => { timers.push(callback); return { unref() {} } }, clear() {} })
+  const scope = async () => { const { candidates } = await service.controlCandidates('chat'); return service.createControlScope('chat', { candidateIds: [candidates[0].candidateId] }) }
+  return { service, client, calls, timers, descriptions, scope, receipt, bindings, gate }
+}
+test('human scope attaches without connecting, preserves maintenance CAS and raw decimal command', async () => {
+  const x = setup(), s = await x.scope()
+  assert.equal(x.calls[0][1].intent, 'attach'); assert.equal(x.calls[0][1].lease_ms, 120000)
+  assert.deepEqual(x.calls[1], ['permission', { maintenance: true, control: true }, 'old'])
+  const raw = '1.00000000000000000000000000000000000000001'
+  const result = await x.service.submitControl('chat', { scopeId: s.scopeId, command: { action: 'position', mm: raw } })
+  assert.equal(x.calls.at(-1)[1].command.mm, raw); assert.equal(result.results[0].nativeJsonText, '{"n":18446744073709551615}')
+  await assert.rejects(x.service.submitControl('other', { scopeId: s.scopeId, command: { action: 'position', mm: raw } }), { code: 'not_found' })
+})
+test('transport unknown is retained and forbids another mutation while canonical Stop stays independent and coalesces', async () => {
+  const x = setup(), s = await x.scope(); x.client.controlCommand = async () => { x.calls.push(['unknown']); throw error('sdk_timeout') }
+  const result = await x.service.submitControl('chat', { scopeId: s.scopeId, command: { action: 'heartbeat_once' } })
+  assert.equal(result.results[0].unknownSource, 'transport')
+  assert.equal((await x.service.submitControl('chat', { scopeId: s.scopeId, command: { action: 'heartbeat_once' } })).results[0].error.code, 'permission_denied')
+  const stopped = await x.service.stopControlScope('chat', s.scopeId); assert.equal(stopped.unknown, false)
+  await x.service.stopControlScope('chat', s.scopeId); assert.equal(x.calls.filter(v => v[0] === 'stop').length, 1)
+})
+test('known release detaches observer yet original canonical Stop remains available without alias replacement', async () => {
+  const x = setup(), s = await x.scope()
+  const released = await x.service.releaseControlScope('chat', s.scopeId); assert.equal(released.stopAvailable, true); assert.equal(released.controlReady, false)
+  assert.equal(x.calls.filter(v => v[0] === 'detach').length, 1)
+  const stopped = await x.service.stopControlScope('chat', s.scopeId); assert.equal(stopped.unknown, false); assert.equal(x.calls.at(-1)[0], 'original'); assert.equal(x.calls.at(-1)[1].expectedScope.targetId, 'usb')
+  await x.service.disposeControlScopes(); assert.equal(x.calls.filter(v => v[0] === 'detach').length, 1); assert.equal(x.calls.filter(v => v[0] === 'stop').length, 0)
+})
+test('original execution Stop requires an explicit registered reference and accepts only exact canonical scope', async () => {
+  const x = setup(); await assert.rejects(x.service.stopOriginalScope('chat', 'canonical'), { code: 'not_found' })
+  const listed = await x.service.listOriginalStopScopes('chat'), ref = listed.scopes[0]
+  assert.equal(ref.targetId, 'can:1'); assert.equal('bindingId' in ref, false)
+  await assert.rejects(x.service.stopOriginalScope('other', ref.referenceId), { code: 'not_found' })
+  const result = await x.service.stopOriginalScope('chat', ref.referenceId); assert.equal(result.unknown, false); assert.equal(result.operationId, 'canonical')
+  await x.service.stopOriginalScope('chat', ref.referenceId); assert.equal(x.calls.filter(v => v[0] === 'original').length, 1)
+})
+test('instance change cannot replay an old scope; late attach after disposal is detached without granting', async () => {
+  const x = setup(), s = await x.scope(); x.descriptions.instance_id = 'new'
+  await assert.rejects(x.service.stopControlScope('chat', s.scopeId), { code: 'instance_mismatch' })
+  const y = setup(); let resolve; y.client.bind = request => new Promise(r => { resolve = () => r({ ...request, binding_id: 'late', identity: request.expected_identity }) })
+  const opening = y.scope(); await new Promise(r => setImmediate(r)); await y.service.disposeControlScopes(); resolve()
+  await assert.rejects(opening, { code: 'disposed' }); assert.equal(y.calls.filter(v => v[0] === 'detach').length, 1); assert.equal(y.calls.filter(v => v[0] === 'permission').length, 0)
+})
+test('group partial failure preserves prior unknown separately from the new never-submitted request', async () => {
+  const x = setup()
+  x.client.createControlGroup = async (_i, bindings) => ({ groupId: 'group', reservationId: 'group-r', stopRequestId: 'group-stop', members: bindings.map(b => ({ bindingId: b.binding_id, controlEpoch: '1', stopRequestId: `stop-${b.binding_id}` })) })
+  x.client.groupTickets = async () => ({ requests: x.bindings.map((b, i) => ({ bindingId: b.binding_id, operationId: `new${i}`, controlEpoch: '1' })) })
+  x.client.groupSubmit = async (_i, _g, intent) => ({ members: x.bindings.map((b, i) => ({ bindingId: b.binding_id, operation: x.receipt(b, { claimantId: 'chat', operationId: i === 0 ? 'previous' : intent.requests[i].operationId }, 'position'), error: i === 0 ? { code: 'busy', message: 'new request rejected' } : null })) })
+  const originalSubmit = x.client.groupSubmit
+  x.client.groupSubmit = async (...args) => { const v = await originalSubmit(...args); v.members[0].operation.submission = 'unknown'; v.members[0].operation.controlEffect = 'unresolved'; return v }
+  const { candidates } = await x.service.controlCandidates('chat'), scope = await x.service.createControlScope('chat', { candidateIds: candidates.map(c => c.candidateId) })
+  const run = await x.service.submitControl('chat', { scopeId: scope.scopeId, command: { action: 'position', mm: '0.1234567890123456789' } })
+  assert.equal(run.results.length, 2); assert.equal(run.results[0].operationId, 'new0'); assert.equal(run.results[0].submission, 'not_submitted')
+  assert.equal(run.results[0].previousOperationId, 'previous'); assert.equal(run.results[0].previousUnknown, true); assert.equal(run.unknown, true)
+  assert.equal((await x.service.submitControl('chat', { scopeId: scope.scopeId, command: { action: 'heartbeat_once' } })).results[0].error.code, 'permission_denied')
+})
+test('original cleanup has its own ticket and unknown is queried without mutation replay', async () => {
+  const x = setup(), [{ referenceId }] = (await x.service.listOriginalStopScopes('chat')).scopes
+  x.client.originalCleanupTicket = async () => { x.calls.push(['cleanup-ticket']); return { operationId: 'cleanup', grantId: 'g' } }
+  x.client.cleanupOriginalScope = async () => { x.calls.push(['cleanup']); throw error('sdk_timeout') }
+  const first = await x.service.cleanupOriginalScope('chat', { referenceId, action: 'heartbeat_stop' }); assert.equal(first.unknownSource, 'transport')
+  await assert.rejects(x.service.cleanupOriginalScope('chat', { referenceId, action: 'heartbeat_stop' }), { code: 'busy' })
+  await assert.rejects(x.service.getOriginalScopeOperation('chat', { referenceId, operationId: 'forged' }), { code: 'not_found' })
+  x.client.controlOperation = async () => ({ ...x.receipt({ target_id: 'can:1', identity: { uid: 'u1', run_nonce: 'n' } }, { operationId: 'cleanup', claimantId: 'chat' }, 'heartbeat_stop'), submission: 'not_submitted', controlEffect: 'not_attempted' })
+  const known = await x.service.getOriginalScopeOperation('chat', { referenceId, operationId: 'cleanup' }); assert.equal(known.unknown, false); assert.equal(known.submission, 'not_submitted')
+  assert.equal(x.calls.filter(c => c[0] === 'cleanup').length, 1); assert.equal(x.calls.filter(c => c[0] === 'stop').length, 0)
+})
+test('trial metadata preserves SDK active state, Stop observation and native text without deriving business state', async () => {
+  const x = setup(), scope = await x.scope()
+  x.client.startTrial = async (b, intent) => x.receipt(b, intent, 'trial_start')
+  x.client.trialStatus = async (b, id) => ({ trialId: id, operation: x.receipt(b, { claimantId: 'chat', operationId: id }, 'trial_start'), trial: { state: 'active', stopObserved: false, stopConfirmationOverdue: false, elapsedMs: '18446744073709551615', nativeJsonText: '{"elapsed":18446744073709551615}' } })
+  x.client.recordingStatus = async () => ({ recordingId: 'rec', active: true, failed: false, nativeJsonText: '{"active":true}' })
+  const parameters = { mode: 'position', command: { positionMm: '1e-20', velocityMmS: '', forceN: '', equilibriumMm: '', stiffnessNPerMm: '', dampingNsPerMm: '' }, envelope: { positionMinMm: '0', positionMaxMm: '10', velocityAbsMaxMmS: '1', forceAbsMaxN: '1', stiffnessMaxNPerMm: '1', dampingMaxNsPerMm: '1', durationMaxS: '1' }, durationS: '1', reach: null }
+  const start = await x.service.startControlTrial('chat', { scopeId: scope.scopeId, parameters })
+  const context = await x.service.controlContext('chat'), trial = context.scopes[0].trial
+  assert.equal(trial.trialId, start.trialId); assert.equal(trial.state, 'active'); assert.equal(trial.results[0].elapsedMs, '18446744073709551615'); assert.equal(trial.results[0].trialNativeJsonText, '{"elapsed":18446744073709551615}')
+  assert.equal(context.scopes[0].recordings[0].active, true)
+})
+test('Stop remains callable while a target POST is unresolved and later target completion cannot replace Stop record', async () => {
+  const x = setup(), scope = await x.scope(); let resolve
+  x.client.controlCommand = (b, intent) => new Promise(r => { resolve = () => r(x.receipt(b, intent, 'position')) })
+  const submitting = x.service.submitControl('chat', { scopeId: scope.scopeId, command: { action: 'position', mm: '1' } })
+  await new Promise(r => setImmediate(r))
+  const stopped = await x.service.stopControlScope('chat', scope.scopeId); assert.equal(stopped.action, 'stop')
+  resolve(); await submitting
+  assert.equal((await x.service.controlContext('chat')).scopes[0].latest.action, 'stop')
+})
+test('blocked release retains leases and explicit revoke preserves maintenance without Stop', async () => {
+  const x = setup(), scope = await x.scope()
+  x.client.releaseControlReservation = async () => ({ blocked: ['usb'] })
+  const blocked = await x.service.releaseControlScope('chat', scope.scopeId); assert.equal(blocked.state, 'active'); assert.equal(x.calls.filter(v => v[0] === 'detach').length, 0)
+  await x.timers.shift()(); assert.equal(x.calls.filter(v => v[0] === 'renew').length, 1)
+  const revoked = await x.service.revokeControlScope('chat', scope.scopeId)
+  assert.equal(revoked.controlReady, false); assert.equal(revoked.stopAvailable, false)
+  assert.deepEqual(x.calls.filter(v => v[0] === 'permission').at(-1), ['permission', { maintenance: true, control: false }, 'old'])
+  assert.equal(x.calls.filter(v => v[0] === 'stop').length, 0)
+})
+
+test('ticket preparation timeout is known never-submitted and does not fabricate an operation ID', async () => {
+  const x = setup(), scope = await x.scope(); x.client.controlTicket = async () => { throw error('sdk_timeout') }
+  const result = await x.service.submitControl('chat', { scopeId: scope.scopeId, command: { action: 'heartbeat_once' } })
+  assert.equal(result.unknown, false); assert.equal(result.results[0].operationId, null); assert.equal(result.results[0].submission, 'not_submitted'); assert.equal(x.calls.filter(v => v[0] === 'command').length, 0)
+})
+
+test('canonical Stop bypasses a stalled lifecycle/metadata attachment queue', async () => {
+  const x = setup(), scope = await x.scope(); x.gate.hold = true
+  const stopped = await x.service.stopControlScope('chat', scope.scopeId)
+  assert.equal(stopped.action, 'stop'); assert.equal(x.calls.filter(v => v[0] === 'stop').length, 1)
+})
+
+test('disposal after permission GET prevents granting and after grant prevents the next member or reservation', async () => {
+  for (const pause of ['view', 'grant']) {
+    const x = setup(); let resume
+    if (pause === 'view') x.client.permissionView = () => new Promise(resolve => { resume = () => resolve({ maintenance: true, control: false, grantId: 'old' }) })
+    else x.client.controlPermission = () => new Promise(resolve => { x.calls.push(['permission']); resume = () => resolve({ grantId: 'g', controlEpoch: '1', stopRequestId: 'stop-b0' }) })
+    x.client.createControlGroup = async () => { x.calls.push(['group']); throw error('unexpected') }
+    const { candidates } = await x.service.controlCandidates('chat')
+    const opening = x.service.createControlScope('chat', { candidateIds: candidates.map(c => c.candidateId) })
+    await new Promise(resolve => setImmediate(resolve)); await x.service.disposeControlScopes(); resume()
+    await assert.rejects(opening, { code: 'disposed' })
+    assert.equal(x.calls.filter(v => v[0] === 'permission').length, pause === 'view' ? 0 : 1)
+    assert.equal(x.calls.filter(v => v[0] === 'bind').length, 1)
+    assert.equal(x.calls.filter(v => v[0] === 'group').length, 0)
+    assert.equal(x.calls.filter(v => v[0] === 'detach').length, 1)
+  }
+})
+
+test('fresh Host can only recover old cleanup by GET with exact original scope action claimant and ID', async () => {
+  const x = setup(), [scope] = (await x.service.listOriginalStopScopes('chat')).scopes
+  const b = { target_id: scope.targetId, identity: { uid: scope.uid, run_nonce: scope.runNonce } }
+  let gets = 0, variant = 'valid'
+  x.client.controlOperation = async (_instance, id) => {
+    gets++; const op = x.receipt(b, { operationId: id, claimantId: variant === 'claimant' ? 'other' : 'chat' }, variant === 'action' ? 'position' : 'heartbeat_stop')
+    if (variant === 'identity') op.members[0].identity.uid = 'wrong'
+    if (variant === 'id') op.operationId = 'other'
+    if (variant === 'epoch') op.controlEpoch = 'other'
+    return op
+  }
+  const request = { referenceId: scope.referenceId, operationId: 'old-op', action: 'heartbeat_stop' }
+  for (variant of ['claimant', 'action', 'identity', 'id', 'epoch']) await assert.rejects(x.service.getOriginalScopeOperation('chat', request), { code: 'invalid_response' })
+  variant = 'valid'; const recovered = await x.service.getOriginalScopeOperation('chat', request)
+  assert.equal(recovered.operationId, 'old-op'); assert.equal(recovered.referenceId, scope.referenceId)
+  assert.equal(gets, 6); assert.equal(x.calls.length, 0)
+  await assert.rejects(x.service.getOriginalScopeOperation('chat', { ...request, operationId: 'not-canonical', action: 'stop' }), { code: 'bad_request' }); assert.equal(gets, 6)
+  await assert.rejects(x.service.getOriginalScopeOperation('other', request), { code: 'not_found' })
+})
+
+test('read-only canonical Stop recovery seeds the same Stop cache and never repeats POST', async () => {
+  const x = setup(), [scope] = (await x.service.listOriginalStopScopes('chat')).scopes
+  x.client.controlOperation = async () => ({ ...x.receipt({ target_id: scope.targetId, identity: { uid: scope.uid, run_nonce: scope.runNonce } }, { operationId: scope.stopRequestId, claimantId: 'earlier-chat' }, 'stop'), submission: 'unknown', controlEffect: 'unresolved' })
+  const recovered = await x.service.getOriginalScopeOperation('chat', { referenceId: scope.referenceId, operationId: scope.stopRequestId, action: 'stop' })
+  assert.equal(recovered.unknownSource, 'sdk')
+  const repeated = await x.service.stopOriginalScope('chat', scope.referenceId)
+  assert.equal(repeated.unknownSource, 'sdk'); assert.equal(repeated.newSubmission, false)
+  assert.equal(x.calls.filter(call => call[0] === 'original').length, 0)
+})

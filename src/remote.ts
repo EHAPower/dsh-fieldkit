@@ -1,3 +1,6 @@
+import type { FieldkitOriginalCleanupRequest, FieldkitOriginalOperationRequest } from './remote-types.js'
+import type { FieldkitControlCandidates, FieldkitControlContext, FieldkitControlRecordingRequest, FieldkitControlRequest, FieldkitControlResult, FieldkitControlScope, FieldkitControlScopeRequest, FieldkitOriginalStopResult, FieldkitOriginalStopScopes, FieldkitTrialReceipt, FieldkitTrialStartRequest, FieldkitTrialUpdateRequest } from './remote-types.js'
+import type { FieldkitConfigurationSchema, FieldkitConfigurationValidation, FieldkitConfigurationReadRequest, FieldkitConfigurationRead, FieldkitMaintenanceContext, FieldkitMaintenancePermissionRequest, FieldkitMaintenanceGrant, FieldkitMaintenanceRequest, FieldkitMaintenanceReceipt } from './remote-types.js'
 import type { FieldkitAdvancedConnectionRequest, FieldkitAdvancedScanRequest, FieldkitProfileScanRequest, FieldkitBatchConnectionRequest } from './remote-types.js'
 import type { FieldkitConnectionResult, FieldkitConnections, FieldkitProfiles, FieldkitProfile, FieldkitJob, FieldkitRecordingRequest, FieldkitConnection, FieldkitConnectionChange, FieldkitScanRequest, FieldkitScan, FieldkitEvents, FieldkitReportRequest, FieldkitDownload } from './remote-types.js'
 import type { Context } from '@deepseek-ai/cordis'
@@ -43,6 +46,77 @@ export class FieldkitRemote extends TypertRemoteService {
   constructor(ctx: Context) {
     super(ctx, 'fieldkitRemote', { namespace: 'fieldkit' })
   }
+
+  @Remote('controlCandidates')
+  controlCandidates(sessionId: string): Promise<FieldkitControlCandidates> { return Promise.resolve().then(() => this.ctx.fieldkit.controlCandidates(sessionId)).catch(fieldkitRemoteFailure) }
+
+  @Remote('createControlScope')
+  createControlScope(sessionId: string, request: FieldkitControlScopeRequest): Promise<FieldkitControlScope> { return Promise.resolve().then(() => this.ctx.fieldkit.createControlScope(sessionId, request)).catch(fieldkitRemoteFailure) }
+
+  @Remote('selectControlScope')
+  selectControlScope(sessionId: string, scopeId: string): Promise<FieldkitControlContext> { return Promise.resolve().then(() => this.ctx.fieldkit.selectControlScope(sessionId, scopeId)).catch(fieldkitRemoteFailure) }
+
+  @Remote('controlContext')
+  controlContext(sessionId: string): Promise<FieldkitControlContext> { return Promise.resolve().then(() => this.ctx.fieldkit.controlContext(sessionId)).catch(fieldkitRemoteFailure) }
+
+  @Remote('submitControl')
+  submitControl(sessionId: string, request: FieldkitControlRequest): Promise<FieldkitControlResult> { return Promise.resolve().then(() => this.ctx.fieldkit.submitControl(sessionId, request)).catch(fieldkitRemoteFailure) }
+
+  @Remote('recordControl')
+  recordControl(sessionId: string, request: FieldkitControlRecordingRequest): Promise<FieldkitControlResult> { return Promise.resolve().then(() => this.ctx.fieldkit.recordControl(sessionId, request)).catch(fieldkitRemoteFailure) }
+
+  @Remote('stopControlScope')
+  stopControlScope(sessionId: string, scopeId: string): Promise<FieldkitControlResult> { return Promise.resolve().then(() => this.ctx.fieldkit.stopControlScope(sessionId, scopeId)).catch(fieldkitRemoteFailure) }
+
+  @Remote('revokeControlScope')
+  revokeControlScope(sessionId: string, scopeId: string): Promise<FieldkitControlScope> { return Promise.resolve().then(() => this.ctx.fieldkit.revokeControlScope(sessionId, scopeId)).catch(fieldkitRemoteFailure) }
+
+  @Remote('releaseControlScope')
+  releaseControlScope(sessionId: string, scopeId: string): Promise<FieldkitControlScope> { return Promise.resolve().then(() => this.ctx.fieldkit.releaseControlScope(sessionId, scopeId)).catch(fieldkitRemoteFailure) }
+
+  @Remote('startControlTrial')
+  startControlTrial(sessionId: string, request: FieldkitTrialStartRequest): Promise<FieldkitTrialReceipt> { return Promise.resolve().then(() => this.ctx.fieldkit.startControlTrial(sessionId, request)).catch(fieldkitRemoteFailure) }
+
+  @Remote('updateControlTrial')
+  updateControlTrial(sessionId: string, request: FieldkitTrialUpdateRequest): Promise<FieldkitTrialReceipt> { return Promise.resolve().then(() => this.ctx.fieldkit.updateControlTrial(sessionId, request)).catch(fieldkitRemoteFailure) }
+
+  @Remote('getControlTrial')
+  getControlTrial(sessionId: string, trialId: string): Promise<FieldkitTrialReceipt> { return Promise.resolve().then(() => this.ctx.fieldkit.getControlTrial(sessionId, trialId)).catch(fieldkitRemoteFailure) }
+
+  @Remote('releaseControlTrial')
+  releaseControlTrial(sessionId: string, trialId: string): Promise<FieldkitTrialReceipt> { return Promise.resolve().then(() => this.ctx.fieldkit.releaseControlTrial(sessionId, trialId)).catch(fieldkitRemoteFailure) }
+
+  @Remote('listOriginalStopScopes')
+  listOriginalStopScopes(sessionId: string): Promise<FieldkitOriginalStopScopes> { return Promise.resolve().then(() => this.ctx.fieldkit.listOriginalStopScopes(sessionId)).catch(fieldkitRemoteFailure) }
+
+  @Remote('stopOriginalScope')
+  stopOriginalScope(sessionId: string, referenceId: string): Promise<FieldkitOriginalStopResult> { return Promise.resolve().then(() => this.ctx.fieldkit.stopOriginalScope(sessionId, referenceId)).catch(fieldkitRemoteFailure) }
+
+  @Remote('cleanupOriginalScope')
+  cleanupOriginalScope(sessionId: string, request: FieldkitOriginalCleanupRequest): Promise<FieldkitOriginalStopResult> { return Promise.resolve().then(() => this.ctx.fieldkit.cleanupOriginalScope(sessionId, request)).catch(fieldkitRemoteFailure) }
+  @Remote('getOriginalScopeOperation')
+  getOriginalScopeOperation(sessionId: string, request: FieldkitOriginalOperationRequest): Promise<FieldkitOriginalStopResult> { return Promise.resolve().then(() => this.ctx.fieldkit.getOriginalScopeOperation(sessionId, request)).catch(fieldkitRemoteFailure) }
+
+  @Remote('configurationSchema')
+  configurationSchema(sessionId: string): Promise<FieldkitConfigurationSchema> { return Promise.resolve().then(() => this.ctx.fieldkit.configurationSchema(sessionId)).catch(fieldkitRemoteFailure) }
+
+  @Remote('validateConfiguration')
+  validateConfiguration(sessionId: string, rawText: string): Promise<FieldkitConfigurationValidation> { return Promise.resolve().then(() => this.ctx.fieldkit.validateConfiguration(sessionId, rawText)).catch(fieldkitRemoteFailure) }
+
+  @Remote('readConfiguration')
+  readConfiguration(sessionId: string, request: FieldkitConfigurationReadRequest): Promise<FieldkitConfigurationRead> { return Promise.resolve().then(() => this.ctx.fieldkit.readConfiguration(sessionId, request)).catch(fieldkitRemoteFailure) }
+
+  @Remote('maintenanceContext')
+  maintenanceContext(sessionId: string): Promise<FieldkitMaintenanceContext> { return Promise.resolve().then(() => this.ctx.fieldkit.maintenanceContext(sessionId)).catch(fieldkitRemoteFailure) }
+
+  @Remote('setMaintenancePermission')
+  setMaintenancePermission(sessionId: string, request: FieldkitMaintenancePermissionRequest): Promise<FieldkitMaintenanceGrant | null> { return Promise.resolve().then(() => this.ctx.fieldkit.setMaintenancePermission(sessionId, request)).catch(fieldkitRemoteFailure) }
+
+  @Remote('submitMaintenance')
+  submitMaintenance(sessionId: string, request: FieldkitMaintenanceRequest): Promise<FieldkitMaintenanceReceipt> { return Promise.resolve().then(() => this.ctx.fieldkit.submitMaintenance(sessionId, request)).catch(fieldkitRemoteFailure) }
+
+  @Remote('getMaintenanceOperation')
+  getMaintenanceOperation(sessionId: string, operationId: string): Promise<FieldkitMaintenanceReceipt> { return Promise.resolve().then(() => this.ctx.fieldkit.getMaintenanceOperation(sessionId, operationId)).catch(fieldkitRemoteFailure) }
 
   @Remote('serviceStatus')
   serviceStatus(): Promise<FieldkitServiceStatus> { return Promise.resolve().then(() => this.ctx.fieldkit.serviceStatus()).catch(fieldkitRemoteFailure) }

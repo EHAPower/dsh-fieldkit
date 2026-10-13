@@ -1,3 +1,6 @@
+import { ControlWorkbench, ScopeStopBar, OriginalScopeStop } from './client/ControlWorkbench.js'
+import type { FieldkitControlContext } from './remote-types.js'
+import { ConfigurationMaintenance } from './client/ConfigurationMaintenance.js'
 import { Connections } from './client/Connections.js'
 import { Observation } from './client/Observation.js'
 import { Recordings } from './client/Recordings.js'
@@ -36,8 +39,10 @@ function EmbeddedChat(props: any) {
 function isRunSettled(run: any) { return run?.phase === 'finished' || run?.phase === 'report_failed' }
 function FieldkitPanel(props: any) {
   const { remote, sessions, ensureSession, SessionProvider, renderSlot } = props
+  const [controlState, setControlState] = useState<{ sessionId: string | null; value: FieldkitControlContext | null }>({ sessionId: null, value: null })
   const [tab, setTab] = useState('connections')
   const [sessionId, setSessionId] = useState<string | null>(null)
+  const controlContext = controlState.sessionId === sessionId ? controlState.value : null
   const [reference, setReference] = useState<any>(null)
   const [serviceStatus, setServiceStatus] = useState<FieldkitServiceStatus | null>(null)
   const [serviceSettings, setServiceSettings] = useState<FieldkitServiceSettings | null>(null)
@@ -95,8 +100,8 @@ function FieldkitPanel(props: any) {
       const nextDescribe = valueOf(await remote.describe())
       if (!current(ticket)) return
       setDescribe(nextDescribe)
-      if (nextDescribe.mode === 'service-v2') { const status = valueOf(await remote.serviceStatus()); if (!current(ticket)) return; setServiceStatus(status); setServiceSettings(status.settings) }
       if (!nextDescribe.available) {
+        if (nextDescribe.mode === 'service-v2') { const status = valueOf(await remote.serviceStatus()); if (!current(ticket)) return; setServiceStatus(status); setServiceSettings(status.settings) }
         setTargets([]); setDiscovery({ limited: false, reason: null })
         setSnapshot(null); setReadRun(null)
         if (bindingRef.current) selectBinding({ ...bindingRef.current, expired: true })
@@ -118,6 +123,7 @@ function FieldkitPanel(props: any) {
           if (current(ticket, selected.bindingId)) { setSnapshot(nextSnapshot); setReadRun(nextSnapshot.readRun ?? null) }
         } catch (error) { if (current(ticket, selected.bindingId)) { setSnapshot(null); if (isExpiredBindingError(error)) selectBinding({ ...selected, expired: true }); snapshotWarning = isExpiredBindingError(error) ? `观察已过期；身份、代次或实例不再匹配，请明确重新选择目标。${errorText(error)}` : `目标已选，但缓存状态不可读：${errorText(error)}` } }
       }
+      if (nextDescribe.mode === 'service-v2') { const status = valueOf(await remote.serviceStatus()); if (!current(ticket)) return; setServiceStatus(status); setServiceSettings(status.settings) }
       if (current(ticket)) setNotice(snapshotWarning ?? (selected?.expired ? '绑定已过期，请明确重新选择目标。' : '目标列表已刷新。'))
     } catch (error) {
       if (current(ticket)) { setSnapshot(null); setReadRun(null); if (bindingRef.current && isExpiredBindingError(error)) selectBinding({ ...bindingRef.current, expired: true }); setNotice(`刷新失败：${errorText(error)}`) }
@@ -201,8 +207,22 @@ function FieldkitPanel(props: any) {
       setServiceStatus(status); setServiceSettings(status.settings); setShutdownConfirmed(false)
       if (status.error) { setNotice(`服务操作未完成：${errorText(status.error)}`); return }
       setTargets([]); setSnapshot(null); setReadRun(null)
-      if (bindingRef.current) selectBinding({ ...bindingRef.current, expired: true })
-      setNotice(action === 'shutdown' ? '服务已受理退出；没有请求设备 Stop，不能据此认定设备停止。' : action === 'save' ? '设置已保存。请发现或启动服务，再刷新目标。' : '服务已认证附着。请刷新目标并明确选择设备。')
+      selectBinding(null)
+      if (action !== 'shutdown') {
+        const next = valueOf(await remote.describe())
+        if (!current(ticket)) return
+        setDescribe(next)
+        if (sessionId && next.available) {
+          const listed = valueOf(await remote.listTargets(sessionId))
+          if (!current(ticket)) return
+          setTargets(listed.targets ?? []); setDiscovery({ limited: listed.discoveryLimited === true, reason: listed.discoveryReason ?? null })
+          selectBinding(listed.selectedBinding?.expired ? null : listed.selectedBinding ?? null)
+          const actual = valueOf(await remote.serviceStatus())
+          if (!current(ticket)) return
+          setServiceStatus(actual); setServiceSettings(actual.settings)
+        }
+      } else setDescribe((previous: any) => previous ? { ...previous, available: false, capabilities: [], instanceId: null } : { mode: 'service-v2', available: false, capabilities: [], instanceId: null })
+      setNotice(action === 'shutdown' ? '服务已受理退出；没有请求设备 Stop，不能据此认定设备停止。' : action === 'save' ? '设置已保存，服务能力与目标状态已重新核对；服务未运行时请显式启动。' : '服务已认证附着，能力与目标已刷新。请明确选择设备。')
     } catch (error) {
       if (current(ticket)) { setNotice(`服务操作失败：${errorText(error)}`); if (bindingRef.current) selectBinding({ ...bindingRef.current, expired: true }); setSnapshot(null) }
     } finally { end() }
@@ -307,6 +327,8 @@ function FieldkitPanel(props: any) {
   return React.createElement('main', { 'data-fieldkit-panel': '' },
     React.createElement('style', null, PANEL_CSS),
     React.createElement('section', { className: 'fieldkit-workbench' },
+      sessionId && React.createElement(ScopeStopBar, { fixedScope: controlContext?.scopes.find(scope => scope.scopeId === controlContext.activeScopeId) ?? null, status: controlContext?.scopes.find(scope => scope.scopeId === controlContext.activeScopeId)?.latest, onStop: (scopeId: string) => remote.stopControlScope(sessionId, scopeId) }),
+      sessionId && React.createElement(OriginalScopeStop, { remote, sessionId }),
       React.createElement('div', { style: styles.card },
         React.createElement('h1', null, 'EHA Fieldkit'),
         React.createElement('p', { role: 'status' }, notice),
@@ -317,14 +339,16 @@ function FieldkitPanel(props: any) {
           React.createElement('button', { style: styles.button, disabled: !binding || busy, onClick: detach }, '取消选择 / 解除观察'),
         ),
         !canDiagnose && React.createElement('p', null, `诊断不可用：${busy ? '操作进行中' : !binding ? '先明确选择目标' : binding.expired ? '观察已过期，请重新选择' : !snapshot ? '先读取缓存状态' : snapshot.readiness?.reasonCode ?? '读取门尚未开放'}。`),
-        describe && React.createElement('p', null, `模式：${describe.mode}　协议：${text(describe.protocol)}　只读：是`),
+        describe && React.createElement('p', null, `模式：${describe.mode}　协议：${text(describe.protocol)}　默认只读；维护须明确授权`),
         legacy && React.createElement('p', null, 'Legacy CLI 是六次离散命令采集，不是持续 owner 会话或同一时刻快照；不会自动回退。'),
         discovery.limited && React.createElement('p', { role: 'alert' }, `目标发现不完整：${text(discovery.reason)}`),
       ),
-      describe?.mode === 'service-v2' && React.createElement(ServiceSettings, { serviceSettings, serviceStatus, setServiceSettings, shutdownConfirmed, setShutdownConfirmed, busy, manageService }),
-      React.createElement('nav', { 'aria-label': 'Fieldkit 工作区', style: styles.row }, [['connections', '连接'], ['observe', '观察与诊断'], ['records', '记录 / ODrive']].map(([key, label]) => React.createElement('button', { key, 'aria-pressed': tab === key, onClick: () => setTab(key), style: styles.button }, label))),
+      (describe?.mode === 'service-v2' || serviceSettings !== null) && React.createElement(ServiceSettings, { serviceSettings, serviceStatus, setServiceSettings, shutdownConfirmed, setShutdownConfirmed, busy, manageService }),
+      React.createElement('nav', { 'aria-label': 'Fieldkit 工作区', style: styles.row }, [['connections', '连接'], ['observe', '观察与诊断'], ['records', '记录 / ODrive'], ['configuration', '配置 / 维护'], ['control', '控制 / 试验']].map(([key, label]) => React.createElement('button', { key, 'aria-pressed': tab === key, onClick: () => setTab(key), style: styles.button }, label))),
+      sessionId && React.createElement('div', { style: { display: tab === 'control' ? 'block' : 'none' } }, React.createElement(ControlWorkbench, { remote, sessionId, currentBinding: binding, busy, visible, onContextChange: (value: FieldkitControlContext) => setControlState({ sessionId, value }) })),
       tab === 'connections' && React.createElement(Connections, { remote, sessionId, capabilities: describe?.capabilities, instanceId: describe?.instanceId, targets, busy, openTarget, refresh }),
       tab === 'records' && React.createElement(Recordings, { remote, sessionId, capabilities: describe?.capabilities }),
+      sessionId && React.createElement('div', { style: { display: tab === 'configuration' ? 'block' : 'none' } }, React.createElement(ConfigurationMaintenance, { remote, sessionId, binding, busy, onRefresh: refresh, onBindingInvalidated: (target: any, reason: string) => { if (bindingRef.current?.bindingId === target.bindingId && bindingRef.current?.instanceId === target.instanceId) { selectBinding({ ...bindingRef.current, expired: true }); setSnapshot(null); setNotice(reason) } }, capabilities: describe?.capabilities, visible: visible && tab === 'configuration' })),
       React.createElement('div', { style: { display: tab === 'observe' ? 'grid' : 'none', gap: 12 } },
       React.createElement(Observation, { remote, sessionId, binding, enabled: describe?.capabilities?.includes('events'), visible: visible && tab === 'observe', onGap: readSnapshot }),
       React.createElement('div', { style: styles.card }, React.createElement('h2', null, '当前观察'),

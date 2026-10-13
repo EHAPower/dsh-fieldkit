@@ -84,9 +84,10 @@ test('USB profile copies complete candidate serial and saves explicit USB fields
   const remote = { ...baseRemote(), saveProfile: async (session, profile) => { calls.push({ session, profile }); return success({ jobId: 'j-save', kind: 'profileSave', state: 'completed', profile, error: null }) } }
   const ui = await ready(remote, { targets: [{ targetId: `usb:${serial}`, label: 'USB 候选', transport: 'usb', connected: false, canAttach: false, canConnect: true, identity: null }] })
   ui.button('填写 USB 档案').props.onClick(); ui.render()
+  assert.equal(ui.nodes().find(n => n.type === 'details' && n.children.some(child => child?.type === 'summary' && child.children.includes('新建 / 编辑 USB 档案'))).props.open, true)
   assert.equal(ui.field('USB 完整稳定序列号').props.value, serial)
   update(ui, 'USB 档案 ID', 'usb-workbench'); update(ui, 'USB 档案名称', '工作台 USB')
-  await ui.button('保存 USB 档案').props.onClick(); ui.render()
+  await ui.button('创建 / 更新 USB 档案').props.onClick(); ui.render()
   assert.equal(calls.length, 1)
   assert.deepEqual(JSON.parse(JSON.stringify(calls[0])), { session: 'chat', profile: { transport: 'usb', id: 'usb-workbench', name: '工作台 USB', serial, expectedUid: null } })
   assert.doesNotMatch(allText(ui), /检查清单/)
@@ -173,7 +174,7 @@ test('managed profile scans work with no connected target and malformed node inp
 
 test('missing completion capabilities remain explicit and never expose callable advanced or USB actions', async () => {
   const ui = await ready(baseRemote(), { capabilities: ['connections', 'managed_profiles'] })
-  assert.equal(ui.button('保存 USB 档案'), undefined)
+  assert.equal(ui.button('创建 / 更新 USB 档案'), undefined)
   assert.equal(ui.button('连接高级 CAN 单节点'), undefined)
   assert.match(allText(ui), /尚未提供 USB 持久档案/)
   assert.match(allText(ui), /尚未提供高级 CAN/)
@@ -287,4 +288,23 @@ test('USB UID query timeout keeps the original task for explicit readonly recove
   assert.doesNotMatch(allText(ui), /结果未知|持久化失败/)
   assert.equal(ui.button('查询 UID 持久任务'), undefined)
   assert.equal(queries, 2); assert.equal(submits, 1)
+})
+
+for (const transport of ['usb', 'can']) test(`editing ${transport} profile expands its form and clearing it never creates or updates a profile`, async () => {
+  const profile = transport === 'usb'
+    ? { transport, id: 'fixture', name: 'Saved USB', serial: 'full-stable', expectedUid: identity.uid }
+    : { transport, id: 'fixture', name: 'Saved CAN', adapter: { kind: 'canable2', serial: 'full-stable' }, node: 7, mode: 'fd', expectedUid: identity.uid }
+  const calls = []
+  const ui = await ready({ ...baseRemote([profile]), saveProfile: async (_, candidate) => { calls.push(candidate); return success({ jobId: 'save', kind: 'profileSave', state: 'completed', profile: candidate, error: null }) } })
+  const kind = transport.toUpperCase(), idLabel = transport === 'usb' ? 'USB 档案 ID' : '档案 ID'
+  const details = () => ui.nodes().find(n => n.type === 'details' && n.children.some(child => child?.type === 'summary' && child.children.includes(`新建 / 编辑 ${kind} 档案`)))
+  assert.equal(details().props.open, false)
+  await ui.button('编辑').props.onClick(); ui.render()
+  assert.equal(details().props.open, true); assert.equal(ui.field(idLabel).props.value, 'fixture')
+  await ui.button(`创建 / 更新 ${kind} 档案`).props.onClick(); ui.render()
+  assert.equal(calls.length, 1); assert.equal(calls[0].id, 'fixture'); assert.equal(calls[0].expectedUid, identity.uid)
+  await ui.button(`清空 ${kind} 表单`).props.onClick(); ui.render()
+  assert.equal(ui.field(idLabel).props.value, ''); assert.equal(calls.length, 1)
+  assert.match(ui.status(), /表单已清空；尚未创建或更新档案/)
+  assert.equal(ui.button(`新建 ${kind} 档案`), undefined)
 })

@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useRef, useState } from 'react'
 import { downloadBlob } from './async.js'
 import { valueOf } from './shared.js'
 import type { FieldkitReadRun } from '../remote-types.js'
@@ -16,12 +16,22 @@ function currentStep(run: any, legacy: boolean) {
 }
 
 export function Diagnostics({ readRun, legacy, remote, sessionId }: { readRun: FieldkitReadRun | null; legacy: boolean; remote: any; sessionId: string | null }) {
-  const [notice, setNotice] = useState(''), [busy, setBusy] = useState(false)
+  const key = JSON.stringify([sessionId, readRun?.readRunId, readRun?.bindingId, readRun?.targetId, readRun?.instanceId, readRun?.connectionGeneration, readRun?.identity?.uid, readRun?.identity?.runNonce])
+  const scope = useRef({ key, generation: 0, pending: false })
+  if (scope.current.key !== key) scope.current = { key, generation: scope.current.generation + 1, pending: false }
+  const generation = scope.current.generation
+  const [state, setState] = useState({ generation, notice: '', busy: false })
+  const { notice, busy } = state.generation === generation ? state : { notice: '', busy: false }
+  const active = () => scope.current.generation === generation
   const download = async (format: 'markdown' | 'json') => {
-    if (!readRun || !sessionId || busy) return
-    setBusy(true)
-    try { const result = valueOf(await remote.downloadReport(sessionId, { readRunId: readRun.readRunId, format })); downloadBlob(result.filename, new Blob([result.content], { type: result.mime })); setNotice('报告文件已交给浏览器下载；采集完整性请查看报告。') }
-    catch (e) { setNotice(errorText(e)) } finally { setBusy(false) }
+    if (!readRun || !sessionId || !active() || scope.current.pending) return
+    scope.current.pending = true; setState({ generation, notice: '', busy: true })
+    try {
+      const result = valueOf(await remote.downloadReport(sessionId, { readRunId: readRun.readRunId, format }))
+      downloadBlob(result.filename, new Blob([result.content], { type: result.mime }))
+      if (active()) setState({ generation, notice: '报告文件已交给浏览器下载；采集完整性请查看报告。', busy: true })
+    } catch (e) { if (active()) setState({ generation, notice: errorText(e), busy: true }) }
+    finally { if (active()) { scope.current.pending = false; setState(current => ({ ...current, busy: false })) } }
   }
   const styles = panelStyles()
   const steps = legacy ? LEGACY_STEPS : INTEGRATION_STEPS

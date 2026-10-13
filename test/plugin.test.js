@@ -16,7 +16,7 @@ function install(config = {}) {
 }
 test('default integration tools share a plugin-owned service and require trusted sessions', async () => {
   const { tools, skills, plugins, guard, service } = install()
-  assert.deepEqual(tools.map(t => t.name), ['fieldkit_devices', 'fieldkit_diagnose', 'fieldkit_check_configuration'])
+  assert.deepEqual(tools.map(t => t.name), ['fieldkit_devices', 'fieldkit_diagnose', 'fieldkit_check_configuration', 'fieldkit_snapshot', 'fieldkit_maintenance_context', 'fieldkit_maintenance', 'fieldkit_maintenance_operation', 'fieldkit_control_context', 'fieldkit_control', 'fieldkit_stop', 'fieldkit_trial', 'fieldkit_trial_status', 'fieldkit_trial_target', 'fieldkit_recording'])
   assert.deepEqual(skills.map(s => s.name), ['connect-check', 'state-triage', 'configuration-review'])
   assert.equal(plugins.length, 1)
   assert.ok(guard({ name: 'bash', arguments: {} }))
@@ -50,7 +50,7 @@ test('tools use exec.agent.id and report guard cannot authorize another chat', a
   assert.equal(large.fullEvidenceReports.json, '/tmp/full.json')
 })
 test('legacy USB name is available only in explicit legacy CLI mode', () => {
-  assert.deepEqual(install({ deviceMode: 'legacy-cli' }).tools.map(t => t.name), ['fieldkit_devices', 'fieldkit_diagnose_usb', 'fieldkit_check_configuration'])
+  assert.deepEqual(install({ deviceMode: 'legacy-cli' }).tools.map(t => t.name), ['fieldkit_devices', 'fieldkit_diagnose_usb', 'fieldkit_check_configuration', 'fieldkit_snapshot'])
 })
 
 test('model evidence preserves read quality and distinct process facts within existing text budget', async () => {
@@ -68,4 +68,23 @@ test('model evidence preserves read quality and distinct process facts within ex
   assert.ok(Buffer.byteLength(run.evidence[0].processError.message) <= 1024)
   assert.ok(Buffer.byteLength(run.evidence[0].nativeJsonText) <= 8192)
   assert.equal(run.evidenceBudgetBytes, 32768)
+})
+
+test('control model tools require trusted identity and cannot grant, select or release a scope', () => {
+  const { guard } = install()
+  for (const name of ['fieldkit_control', 'fieldkit_stop', 'fieldkit_trial', 'fieldkit_recording']) {
+    assert.ok(guard({ name, arguments: {} }))
+    assert.equal(guard({ name, agent: { id: 'chat' }, arguments: {} }), undefined)
+  }
+  for (const name of ['fieldkit_create_scope', 'fieldkit_grant_control', 'fieldkit_cleanup', 'fieldkit_release_scope']) assert.ok(guard({ name, agent: { id: 'chat' }, arguments: {} }))
+})
+
+test('snapshot model tool is registered with trusted-session guard and explicit legacy rejection', async () => {
+  const { tools, guard, service } = install(), tool = tools.find(tool => tool.name === 'fieldkit_snapshot')
+  assert.ok(tool); assert.ok(guard({ name: 'fieldkit_snapshot', arguments: {} }))
+  assert.equal(guard({ name: 'fieldkit_snapshot', agent: { id: 'chat' }, arguments: {} }), undefined)
+  service.selectedBinding = () => null
+  await assert.rejects(tool.execute({}, { agent: { id: 'chat' } }), error => error.code === 'selection_required')
+  const legacy = install({ deviceMode: 'legacy-cli' }).tools.find(tool => tool.name === 'fieldkit_snapshot')
+  await assert.rejects(legacy.execute({}, { agent: { id: 'chat' } }), error => error.code === 'unsupported')
 })

@@ -1,3 +1,5 @@
+import { createP4Client } from './p4-client.js'
+import { createP3Client } from './p3-client.js'
 import { createP2Client } from './p2-client.js'
 import { open } from 'node:fs/promises'
 import { constants } from 'node:fs'
@@ -44,8 +46,9 @@ export function createIntegrationClient({ endpoint, tokenFile, fetchImpl = globa
   if (typeof tokenFile !== 'string' || !isAbsolute(tokenFile)) throw new TypeError('integrationTokenFile must be an absolute path')
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new TypeError('HTTP timeout must be a positive integer')
 
-  async function request(path, { method = 'GET', body, instanceId, signal } = {}) {
-    const encoded = body === undefined ? undefined : JSON.stringify(apiVersion === 2 ? { ...body, api_version: 2 } : body)
+  async function request(path, { method = 'GET', body, bodyText, instanceId, signal } = {}) {
+    if (bodyText !== undefined && (apiVersion !== 2 || body !== undefined || typeof bodyText !== 'string')) throw new IntegrationError('invalid_request', 'Invalid fixed raw request')
+    const encoded = bodyText ?? (body === undefined ? undefined : JSON.stringify(apiVersion === 2 ? { ...body, api_version: 2 } : body))
     if (encoded !== undefined && Buffer.byteLength(encoded) > requestLimit) throw new IntegrationError('request_too_large', 'Integration request exceeds request limit')
     let token
     let file
@@ -103,7 +106,7 @@ export function createIntegrationClient({ endpoint, tokenFile, fetchImpl = globa
   }
   const bindingPath = b => `/bindings/${encodeURIComponent(b.binding_id)}`
   return {
-    ...(apiVersion === 2 ? createP2Client(request) : {}),
+    ...(apiVersion === 2 ? { ...createP2Client(request), ...createP3Client(request), ...createP4Client(request) } : {}),
     async describe(signal) {
       const value = await request('/describe', { signal })
       requireValue(value.dto_schema_version === 1 && value.config_format_version === 1 && text(value.tool_version), 'Incompatible DTO or configuration format version')
@@ -149,7 +152,7 @@ export function createIntegrationClient({ endpoint, tokenFile, fetchImpl = globa
       return { ...result, ...(apiVersion === 2 ? { read_permit: readPermit(value.read_permit), control_effect: controlEffect(value.control_effect) } : {}), readiness: { ready: value.readiness.ready, reason_code: value.readiness.reason_code }, telemetry_received_age_ms: optionalAge(value.telemetry_received_age_ms), native_json_text: value.native_json_text }
     },
     async read(b, action, signal) {
-      if (!actions.has(action)) throw new TypeError('Unsupported integration read action')
+      if (!actions.has(action) && !(apiVersion === 2 && action === 'config_factory')) throw new TypeError('Unsupported integration read action')
       const value = await request(`${bindingPath(b)}/${apiVersion === 2 ? 'reads' : 'read'}`, { method: 'POST', instanceId: b.instance_id, signal, body: { instance_id: b.instance_id, connection_generation: b.connection_generation, expected_identity: b.identity, action } })
       const result = checkBinding(value, b)
       requireValue(value.action === action && typeof value.native_json_text === 'string', 'Invalid read action or native JSON text')

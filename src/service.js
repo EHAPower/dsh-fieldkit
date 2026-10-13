@@ -1,3 +1,5 @@
+import { createP4Service } from './p4-service.js'
+import { createP3Service } from './p3-service.js'
 import { createP2Service } from './p2-service.js'
 import { readRegisteredReport } from './reports.js'
 import { randomUUID } from 'node:crypto'
@@ -121,7 +123,11 @@ export function createFieldkitService(config = {}, dependencies = {}) {
     try { return await action(owner) }
     catch (error) { return { ...owner.snapshot(), error: { code: typeof error.code === 'string' ? error.code : 'service_unavailable', message: error.message } } }
   }
+  const p3 = createP3Service({ mode, session, selected, invalidateTarget: (target, error) => { const b = bindings.get(target.bindingId); if (b && b.owner?.instance_id === target.instanceId) expire(b, error) }, attach: async () => (await owner.attach()).description, http, busy: () => opening.size > 0 || [...runs.values()].some(r => r.status === 'running') })
+  const p4 = createP4Service({ mode, session, currentInstance: () => owner?.snapshot().instance?.instance_id, attach: async () => (await owner.attach()).description, http, busy: () => p3.maintenanceBusy() || opening.size > 0 || [...runs.values()].some(r => r.status === 'running') })
   const service = {
+    ...p4,
+    ...p3,
     ...createP2Service({ mode, session, attach: async () => (await owner.attach()).description, http, invalidateConnection: targetId => { for (const b of bindings.values()) if (b.target.targetId === targetId) { b.expired = true; stopRenewal(b); void releaseBinding(b, false) } } }),
     serviceStatus() { return manage(o => o.status()) },
     saveServiceSettings(request) { return manage(o => o.save(request)) },
@@ -135,7 +141,7 @@ export function createFieldkitService(config = {}, dependencies = {}) {
       if (!owner && (!config.integrationUrl || !config.integrationTokenFile)) return { ...base, reason: 'Configure fieldkit.integrationUrl and fieldkit.integrationTokenFile.' }
       try {
         const value = owner ? (await owner.attach()).description : await http().describe()
-        return { ...base, available: true, instanceId: value.instance_id, toolVersion: value.tool_version, capabilities: [...value.capabilities] }
+        return { ...base, readOnly: !value.capabilities.includes('maintenance') && !value.capabilities.includes('control'), available: true, instanceId: value.instance_id, toolVersion: value.tool_version, capabilities: [...value.capabilities] }
       } catch (error) { return { ...base, reason: error.message } }
     },
     async listTargets(sessionId) {
@@ -210,7 +216,7 @@ export function createFieldkitService(config = {}, dependencies = {}) {
       const reportsDir = config.reportsDir || (owner ? (await owner.getSettings()).dataDir + '/reports' : null)
       if (b.expired) fail('binding_stale', 'Observation binding expired before diagnosis')
       if (!reportsDir || !isAbsolute(reportsDir)) throw new TypeError('Configure fieldkit.reportsDir with an absolute user-data path')
-      if (opening.size || [...runs.values()].some(r => r.status === 'running')) fail('busy', 'A device diagnosis is already running')
+      if (p3.maintenanceBusy() || opening.size || [...runs.values()].some(r => r.status === 'running')) fail('busy', 'A device diagnosis is already running')
       const run = { sessionId, cancelled: false, readRunId: randomUUID(), bindingId: b.id, targetId: b.target.targetId, mode, instanceId: b.owner?.instance_id ?? null, connectionGeneration: b.owner?.connection_generation ?? null, identity: b.owner ? publicIdentity(b.owner.identity) : null, status: 'running', phase: 'reading', step: 'connection_identity', complete: false, startedAt: new Date().toISOString(), endedAt: null, evidence: [], error: null, reports: null }
       let finish
       const promise = new Promise(resolve => { finish = resolve })
@@ -280,6 +286,7 @@ export function createFieldkitService(config = {}, dependencies = {}) {
       disposed = true
       for (const b of bindings.values()) stopRenewal(b)
       disposal = (async () => {
+        await p4.disposeControlScopes()
         for (const run of runs.values()) if (run.status === 'running') run.cancelled = true
         await Promise.all([...completions.values()].map(item => item.promise))
         await Promise.all([...opening])
