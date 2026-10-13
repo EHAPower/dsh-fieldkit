@@ -136,6 +136,26 @@ export interface FieldkitReadRunRequest { readonly readRunId?: string }
 export interface FieldkitCancelReadRunRequest { readonly readRunId: string }
 
 export interface FieldkitService {
+  connectAdvanced(sessionId: string, request: FieldkitAdvancedConnectionRequest): Promise<FieldkitConnectionResult>
+  scanAdvanced(sessionId: string, request: FieldkitAdvancedScanRequest): Promise<FieldkitScan>
+  scanProfile(sessionId: string, request: FieldkitProfileScanRequest): Promise<FieldkitScan>
+  connectScannedNodes(sessionId: string, request: FieldkitBatchConnectionRequest): Promise<FieldkitJob>
+  listProfiles(sessionId: string): Promise<FieldkitProfiles>
+  saveProfile(sessionId: string, profile: FieldkitProfile): Promise<FieldkitJob>
+  deleteProfile(sessionId: string, profileId: string): Promise<FieldkitJob>
+  listAdapters(sessionId: string): Promise<FieldkitJob>
+  listRecordings(sessionId: string): Promise<FieldkitJob>
+  listOdriveDevices(sessionId: string): Promise<FieldkitJob>
+  readOdrive(sessionId: string, serial: string): Promise<FieldkitJob>
+  getJob(sessionId: string, jobId: string): Promise<FieldkitJob>
+  downloadRecording(sessionId: string, request: FieldkitRecordingRequest): Promise<FieldkitJob>
+  listConnections(sessionId: string): Promise<FieldkitConnections>
+  connectProfile(sessionId: string, profileId: string): Promise<FieldkitConnectionResult>
+  changeConnection(sessionId: string, request: FieldkitConnectionChange): Promise<FieldkitConnection>
+  startScan(sessionId: string, request: FieldkitScanRequest): Promise<FieldkitScan>
+  getScan(sessionId: string, scanId: string): Promise<FieldkitScan>
+  getEvents(sessionId: string, after: string): Promise<FieldkitEvents>
+  downloadReport(sessionId: string, request: FieldkitReportRequest): Promise<FieldkitDownload>
   serviceStatus(): Promise<FieldkitServiceStatus>
   saveServiceSettings(request: FieldkitServiceSettings): Promise<FieldkitServiceStatus>
   startService(): Promise<FieldkitServiceStatus>
@@ -181,3 +201,60 @@ export interface FieldkitServiceStatus {
   readonly instance: FieldkitServiceInstance | null
   readonly error: { readonly code: string; readonly message: string } | null
 }
+
+export type FieldkitProfile = FieldkitCanProfile | FieldkitUsbProfile
+export interface FieldkitUsbProfile { readonly transport: 'usb'; readonly id: string; readonly name: string; readonly serial: string; readonly expectedUid: string | null }
+export interface FieldkitCanProfile { readonly transport?: 'can'; readonly id: string; readonly name: string; readonly adapter: { readonly kind: 'canable2'; readonly serial: string }; readonly node: number; readonly mode: 'fd'; readonly expectedUid: string | null }
+export interface FieldkitProfiles { readonly profiles: readonly FieldkitProfile[]; readonly loadError: string | null; readonly busy: boolean }
+export interface FieldkitConnection { readonly connectionId: string; readonly targetId: string; readonly identity: FieldkitIdentity | null; readonly connectionGeneration: string; readonly connected: boolean; readonly snapshotJsonText: string; readonly telemetryReceivedAgeMs: string | null; readonly profileJobId: string | null }
+export interface FieldkitConnectionChange { readonly connectionId: string; readonly identity: FieldkitIdentity | null; readonly connectionGeneration: string; readonly action: 'disconnect' | 'reconnect' }
+export interface FieldkitScanRequest { readonly connectionId: string; readonly identity: FieldkitIdentity; readonly connectionGeneration: string; readonly nodes: readonly number[] }
+export interface FieldkitScan { readonly scanId: string; readonly state: 'running' | 'completed'; readonly nodes: readonly { readonly node: number; readonly identity: FieldkitIdentity }[]; readonly errors: readonly { readonly node: number; readonly message: string; readonly unknown: boolean; readonly errorJsonText: string | null }[] }
+export interface FieldkitRecordingRequest { readonly runId: string; readonly file: 'metadata.json' | 'events.jsonl' | 'telemetry.csv'; readonly offset: string }
+export interface FieldkitRecording { readonly id: string; readonly metadataJsonText: string | null; readonly files: readonly string[] }
+export interface FieldkitJob {
+  readonly jobId: string
+  readonly kind: 'adapters' | 'recordings' | 'download' | 'profileSave' | 'profileDelete' | 'odriveDevices' | 'odriveRead' | 'batchConnect' | 'connect'
+  readonly state: 'queued' | 'running' | 'completed' | 'failed'
+  readonly error: string | null
+  readonly adapters?: readonly { readonly kind: string; readonly serial: string; readonly description: string; readonly vid: number | null; readonly pid: number | null }[]
+  readonly recordings?: readonly FieldkitRecording[]
+  readonly truncated?: boolean
+  readonly connection?: FieldkitConnection
+  readonly batch?: FieldkitBatchConnections
+  readonly profile?: FieldkitProfile
+  readonly deletedId?: string
+  readonly nativeJsonText?: string
+  readonly download?: { readonly runId: string; readonly file: string; readonly offset: string; readonly nextOffset: string; readonly eof: boolean; readonly contentBase64: string }
+}
+export interface FieldkitEvent {
+  readonly cursor: string
+  readonly kind: 'connection' | 'telemetry' | 'source_gap' | 'scan' | 'job'
+  readonly sourceId: string
+  readonly sourceTimestamp: { readonly clock: 'device_monotonic_us' | 'host_unix_ms'; readonly value: string }
+  readonly receivedAt: string
+  readonly gap: boolean
+  readonly sourceGap: { readonly reason: string; readonly dropped: string | null } | null
+  readonly targetId?: string
+  readonly identity?: FieldkitIdentity | null
+  readonly connectionGeneration?: string
+  readonly connected?: boolean
+  readonly nativeJsonText?: string
+  readonly scanId?: string
+  readonly jobId?: string
+  readonly state?: string
+}
+export interface FieldkitEvents { readonly cursor: string; readonly gap: boolean; readonly gapReasons: readonly string[]; readonly lostRanges: readonly { readonly firstCursor: string; readonly lastCursor: string; readonly count: string }[]; readonly truncated: boolean; readonly events: readonly FieldkitEvent[] }
+export interface FieldkitReportRequest { readonly readRunId: string; readonly format: 'markdown' | 'json' }
+export interface FieldkitDownload { readonly filename: string; readonly mime: string; readonly content: string }
+
+export interface FieldkitConnections { readonly connections: readonly FieldkitConnection[] }
+
+export interface FieldkitAdvancedCan { readonly channel: string; readonly mode: 'classic' | 'fd'; readonly python: string | null }
+export interface FieldkitAdvancedConnectionRequest { readonly channel: string; readonly mode: 'classic' | 'fd'; readonly python: string | null; readonly node: number }
+export interface FieldkitAdvancedScanRequest { readonly advanced: FieldkitAdvancedCan; readonly nodes: readonly number[] }
+export interface FieldkitProfileScanRequest { readonly profileId: string; readonly nodes: readonly number[] }
+export interface FieldkitBatchConnectionRequest { readonly scanId: string; readonly nodes: readonly number[] }
+export interface FieldkitBatchConnections { readonly connections: readonly FieldkitConnection[]; readonly errors: readonly { readonly node: number; readonly targetId: string; readonly code: string; readonly message: string; readonly unknown: boolean; readonly errorJsonText: string | null }[] }
+
+export type FieldkitConnectionResult = FieldkitConnection | FieldkitJob

@@ -1,3 +1,5 @@
+import { createP2Service } from './p2-service.js'
+import { readRegisteredReport } from './reports.js'
 import { randomUUID } from 'node:crypto'
 import { isAbsolute } from 'node:path'
 import { createIntegrationClient } from './integration.js'
@@ -72,7 +74,10 @@ export function createFieldkitService(config = {}, dependencies = {}) {
     b.releaseRequest = (async () => {
       try {
         await b.renewal?.catch(() => {})
-        if (mode !== 'legacy-cli') await (b.client ?? http()).detach(b.owner)
+        if (mode !== 'legacy-cli') {
+          try { await (b.client ?? http()).detach(b.owner) }
+          catch (error) { if (error.code !== 'not_found') throw error }
+        }
         b.released = true
         pendingRelease.delete(b)
         if (forget) bindings.delete(b.id)
@@ -117,6 +122,7 @@ export function createFieldkitService(config = {}, dependencies = {}) {
     catch (error) { return { ...owner.snapshot(), error: { code: typeof error.code === 'string' ? error.code : 'service_unavailable', message: error.message } } }
   }
   const service = {
+    ...createP2Service({ mode, session, attach: async () => (await owner.attach()).description, http, invalidateConnection: targetId => { for (const b of bindings.values()) if (b.target.targetId === targetId) { b.expired = true; stopRenewal(b); void releaseBinding(b, false) } } }),
     serviceStatus() { return manage(o => o.status()) },
     saveServiceSettings(request) { return manage(o => o.save(request)) },
     startService() { return manage(o => o.start()) },
@@ -183,7 +189,7 @@ export function createFieldkitService(config = {}, dependencies = {}) {
         const ownerClient = mode !== 'legacy-cli' ? http() : null
         if (ownerClient) owner = await ownerClient.bind({ instance_id: context.instanceId, target_id: target.targetId, intent: request.intent, ...(mode === 'service-v2' ? { lease_ms: 120000 } : {}), ...(request.intent === 'attach' ? { expected_identity: { uid: target.identity.uid, run_nonce: target.identity.runNonce }, connection_generation: target.connectionGeneration } : {}) })
         if (disposed || revision !== context.selectionRevision) { if (owner) await releaseBinding({ id: randomUUID(), owner, sessionId, client: ownerClient }); fail('stale_selection', 'A newer target selection replaced this request') }
-        const b = { id: randomUUID(), sessionId, target: clone(target), owner, client: ownerClient, expired: false, snapshot: null, observationWarnings: warnings }
+        const b = { id: randomUUID(), sessionId, target: clone(target), owner, client: ownerClient, expired: false, snapshot: null, observationWarnings: warnings.filter((w, i) => warnings.findIndex(v => v.code === w.code && v.message === w.message) === i) }
         bindings.set(b.id, b)
         context.selectedBindingId = b.id
         context.latestRunId = null
@@ -235,7 +241,10 @@ export function createFieldkitService(config = {}, dependencies = {}) {
         if (typeof error.nativeErrorJsonText === 'string') run.evidence.push({ action: run.step, origin: 'owner_error', receivedAt: new Date().toISOString(), identity: run.identity, nativeJsonText: error.nativeErrorJsonText, error: clone(run.error) })
       }
       run.status = run.complete ? 'complete' : 'incomplete'; run.phase = 'saving'; run.endedAt = new Date().toISOString()
-      try { run.reports = await reportWriter(reportsDir, publicRun(run)); run.phase = 'finished' }
+      try {
+        const { phase, reports, reportError, ...collectionResult } = publicRun(run)
+        run.reports = await reportWriter(reportsDir, collectionResult); run.phase = 'finished'
+      }
       catch (error) { run.phase = 'report_failed'; run.reportError = { code: 'report_write_failed', message: error.message } }
       if (b.expired) await releaseBinding(b, false)
       else if (sessions.get(sessionId)?.selectedBindingId !== b.id) await releaseBinding(b)
@@ -277,9 +286,16 @@ export function createFieldkitService(config = {}, dependencies = {}) {
         const warnings = []
         for (const b of new Set([...bindings.values(), ...pendingRelease])) { const error = await releaseBinding(b); if (error) warnings.push(error) }
         owner?.dispose()
-        return { disposed: true, observationWarnings: warnings }
+        return { disposed: true, observationWarnings: warnings.filter((w, i) => warnings.findIndex(v => v.code === w.code && v.message === w.message) === i) }
       })()
       return disposal
+    },
+    async downloadReport(sessionId, request) {
+      requestFields(request, ['readRunId', 'format'])
+      if (!['markdown', 'json'].includes(request.format)) fail('bad_request', 'Unknown report format')
+      const run = getRun(sessionId, request.readRunId)
+      if (!run?.reports) fail('not_found', 'Report is not registered for this read run')
+      return readRegisteredReport(run.reports[request.format], request.readRunId, request.format)
     },
     hasReport(sessionId, path) {
       if (typeof sessionId !== 'string' || !sessionId) return false

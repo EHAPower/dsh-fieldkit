@@ -1,3 +1,9 @@
+import { Connections } from './client/Connections.js'
+import { Observation } from './client/Observation.js'
+import { Recordings } from './client/Recordings.js'
+import { ServiceSettings } from './client/ServiceSettings.js'
+import { Diagnostics } from './client/Diagnostics.js'
+import { text, errorText, valueOf, panelStyles, isExpiredBindingError } from './client/shared.js'
 import { takeOpenedBinding } from './observation.js'
 import React, { useEffect, useRef, useState } from 'react'
 import type { FieldkitServiceSettings, FieldkitServiceStatus } from './remote-types.js'
@@ -8,11 +14,9 @@ export const inject = ['remote', 'slots', 'layout', 'sessions']
 
 const PANEL_ID = 'fieldkit'
 const SESSION_STORAGE_KEY = 'ehapower.dsh-fieldkit.session.v1'
-const INTEGRATION_STEPS = ['connection_identity', 'status', 'measurements', 'diagnostics', 'config_startup', 'config_user']
-const LEGACY_STEPS = ['inspect', 'status', 'measurements', 'diagnostics', 'config_startup', 'config_user']
-const STEP_LABELS: Record<string, string> = { connection_identity: '连接与身份', inspect: 'inspect', status: 'status', measurements: 'measurements', diagnostics: 'diagnostics', config_startup: 'config-read --view startup', config_user: 'config-read --view user' }
 const PANEL_CSS = `
 [data-fieldkit-panel] { display:grid; grid-template-columns:minmax(0,1fr) minmax(320px,38%); gap:16px; height:100%; min-height:0; overflow:hidden; padding:16px; box-sizing:border-box; color:var(--dsh-fg,inherit); }
+[data-fieldkit-panel] input, [data-fieldkit-panel] textarea, [data-fieldkit-panel] select { max-width:100%; min-width:0; box-sizing:border-box; }
 [data-fieldkit-panel] .fieldkit-workbench { display:grid; align-content:start; gap:12px; min-width:0; min-height:0; overflow:auto; }
 [data-fieldkit-panel] .fieldkit-chat { display:flex; flex-direction:column; min-width:0; min-height:0; overflow:auto; }
 [data-fieldkit-panel] .fieldkit-chat-body { flex:1; min-height:0; overflow:auto; }
@@ -29,35 +33,10 @@ function EmbeddedChat(props: any) {
   }, { slots: { views: FixedChatView } })
 }
 
-function text(value: unknown) {
-  return value === null || value === undefined || value === '' ? '—' : String(value)
-}
-
-function errorText(error: any) {
-  const code = error?.code ?? error?.kind ?? error?.error?.code
-  const message = error?.message ?? error?.error?.message ?? String(error)
-  return code ? `${code}：${message}` : message
-}
-
-function valueOf(result: any) {
-  if (result?.ok === true) return result.value
-  const error = new Error(result?.error?.message ?? 'Remote request failed') as Error & { code?: string }
-  error.code = result?.error?.code
-  throw error
-}
-
 function isRunSettled(run: any) { return run?.phase === 'finished' || run?.phase === 'report_failed' }
-function evidenceStep(item: any, index: number, evidence: readonly any[], legacy: boolean) {
-  if (!legacy || item.action !== 'config-read') return item.action
-  return evidence.slice(0, index).filter(entry => entry.action === 'config-read').length === 0 ? 'config_startup' : 'config_user'
-}
-function currentStep(run: any, legacy: boolean) {
-  if (!run || !legacy || run.step !== 'config-read') return run?.step
-  return (run.evidence ?? []).filter((item: any) => item.action === 'config-read').length <= 1 ? 'config_startup' : 'config_user'
-}
-
 function FieldkitPanel(props: any) {
   const { remote, sessions, ensureSession, SessionProvider, renderSlot } = props
+  const [tab, setTab] = useState('connections')
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [reference, setReference] = useState<any>(null)
   const [serviceStatus, setServiceStatus] = useState<FieldkitServiceStatus | null>(null)
@@ -137,11 +116,11 @@ function FieldkitPanel(props: any) {
         try {
           const nextSnapshot = valueOf(await remote.getSnapshot(sessionId, { bindingId: selected.bindingId }))
           if (current(ticket, selected.bindingId)) { setSnapshot(nextSnapshot); setReadRun(nextSnapshot.readRun ?? null) }
-        } catch (error) { if (current(ticket, selected.bindingId)) { setSnapshot(null); snapshotWarning = `目标已选，但缓存状态不可读：${errorText(error)}` } }
+        } catch (error) { if (current(ticket, selected.bindingId)) { setSnapshot(null); if (isExpiredBindingError(error)) selectBinding({ ...selected, expired: true }); snapshotWarning = isExpiredBindingError(error) ? `观察已过期；身份、代次或实例不再匹配，请明确重新选择目标。${errorText(error)}` : `目标已选，但缓存状态不可读：${errorText(error)}` } }
       }
       if (current(ticket)) setNotice(snapshotWarning ?? (selected?.expired ? '绑定已过期，请明确重新选择目标。' : '目标列表已刷新。'))
     } catch (error) {
-      if (current(ticket)) { setSnapshot(null); setReadRun(null); if (bindingRef.current) selectBinding({ ...bindingRef.current, expired: true }); setNotice(`刷新失败：${errorText(error)}`) }
+      if (current(ticket)) { setSnapshot(null); setReadRun(null); if (bindingRef.current && isExpiredBindingError(error)) selectBinding({ ...bindingRef.current, expired: true }); setNotice(`刷新失败：${errorText(error)}`) }
     } finally { end() }
   }
 
@@ -173,6 +152,41 @@ function FieldkitPanel(props: any) {
     return () => { active = false; if (timer) clearTimeout(timer) }
   }, [visible, sessionId, binding?.bindingId, readRun?.readRunId, readRun?.status, readRun?.phase, remote, viewEpoch])
 
+  useEffect(() => {
+    if (!visible || !sessionId) return
+    let active = true, timer: ReturnType<typeof setTimeout>
+    const poll = async () => {
+      if (!busyRef.current) try {
+        const ticket = epoch.current
+        const latest = valueOf(await remote.getReadRun(sessionId, {}))
+        if (!active || !current(ticket) || busyRef.current) return
+        if (latest && latest.bindingId !== bindingRef.current?.bindingId) {
+          const state = valueOf(await remote.listTargets(sessionId))
+          if (!active || !current(ticket) || busyRef.current) return
+          const selected = state.selectedBinding
+          if (selected?.bindingId === latest.bindingId) {
+            selectBinding(selected); setTargets(state.targets); setSnapshot(null)
+            if (!selected.expired) {
+              try {
+                const cached = valueOf(await remote.getSnapshot(sessionId, { bindingId: selected.bindingId }))
+                if (active && current(ticket, selected.bindingId)) setSnapshot(cached)
+              } catch (error) {
+                if (active && current(ticket, selected.bindingId) && isExpiredBindingError(error)) {
+                  selectBinding({ ...selected, expired: true }); setSnapshot(null)
+                  setNotice(`观察已过期：${errorText(error)}；请重新选择目标。`)
+                }
+              }
+            }
+          }
+        }
+        if (active && current(ticket) && latest && latest.bindingId === bindingRef.current?.bindingId) setReadRun((previous: any) => previous?.readRunId === latest.readRunId && previous?.phase === latest.phase && previous?.evidence?.length === latest.evidence.length ? previous : latest)
+      } catch { /* explicit actions surface errors; passive discovery never reconnects */ }
+      finally { if (active) timer = setTimeout(poll, 1000) }
+      else if (active) timer = setTimeout(poll, 1000)
+    }
+    void poll(); return () => { active = false; clearTimeout(timer) }
+  }, [visible, sessionId, remote])
+
   const manageService = async (action: 'save' | 'attach' | 'start' | 'shutdown') => {
     if (!serviceSettings || !begin()) return
     const ticket = invalidate()
@@ -197,17 +211,31 @@ function FieldkitPanel(props: any) {
   const openTarget = async (target: any) => {
     if (!sessionId || !begin()) return
     const ticket = invalidate()
+    let openedBindingId: string | null = null
     try {
       const request = target.connected
         ? { targetId: target.targetId, intent: 'attach', expectedIdentity: target.identity, connectionGeneration: target.connectionGeneration }
         : { targetId: target.targetId, intent: 'connect' }
       const next = await takeOpenedBinding(remote.openTarget(sessionId, request).then(valueOf), () => current(ticket), (late: any) => remote.detachTarget(sessionId, { bindingId: late.bindingId }).then(valueOf))
       if (!next) return
+      openedBindingId = next.bindingId
       selectBinding(next)
       setSnapshot(null)
       setReadRun(null)
-      setNotice(`已选择 ${target.label}；连接代次 ${text(next.connectionGeneration)}。`)
-    } catch (error) { if (current(ticket)) setNotice(`无法选择目标：${errorText(error)}`) } finally { end() }
+      // Refresh authenticated owner facts after the handshake; never invent connected=true.
+      const actual = valueOf(await remote.listTargets(sessionId))
+      if (!current(ticket, next.bindingId)) return
+      setTargets(actual.targets); selectBinding(actual.selectedBinding ?? next)
+      const cached = valueOf(await remote.getSnapshot(sessionId, { bindingId: next.bindingId }))
+      if (!current(ticket, next.bindingId)) return
+      setSnapshot(cached)
+      if (describe?.mode === 'service-v2') { const status = valueOf(await remote.serviceStatus()); if (current(ticket, next.bindingId)) setServiceStatus(status) }
+      if (current(ticket, next.bindingId)) setNotice(`已选择 ${target.label}；连接、缓存与服务概要已刷新，代次 ${text(next.connectionGeneration)}。`)
+    } catch (error) { if (current(ticket)) {
+      const stale = openedBindingId && bindingRef.current?.bindingId === openedBindingId && isExpiredBindingError(error)
+      if (stale) { selectBinding({ ...bindingRef.current, expired: true }); setSnapshot(null) }
+      setNotice(stale ? `观察已过期：${errorText(error)}；请重新选择目标。` : `无法选择目标：${errorText(error)}`)
+    } } finally { end() }
   }
 
   const detach = async () => {
@@ -225,16 +253,17 @@ function FieldkitPanel(props: any) {
 
   const readSnapshot = async () => {
     const selected = bindingRef.current
-    if (!sessionId || !selected || selected.expired || !begin()) return
+    if (!sessionId || !selected || selected.expired || !begin()) return false
     const ticket = epoch.current
     try {
       const next = valueOf(await remote.getSnapshot(sessionId, { bindingId: selected.bindingId }))
-      if (!current(ticket, selected.bindingId)) return
+      if (!current(ticket, selected.bindingId)) return false
       setSnapshot(next)
       if (next.expired) selectBinding({ ...selected, expired: true })
       if (next.readRun && (!readRun || next.readRun.readRunId === readRun.readRunId)) setReadRun(next.readRun)
       setNotice('已读取缓存状态。')
-    } catch (error) { if (current(ticket, selected.bindingId)) { setSnapshot(null); setNotice(`状态读取失败：${errorText(error)}`) } } finally { end() }
+      return true
+    } catch (error) { if (current(ticket, selected.bindingId)) { setSnapshot(null); if (isExpiredBindingError(error)) selectBinding({ ...selected, expired: true }); setNotice(isExpiredBindingError(error) ? `观察已过期；身份、代次或实例不再匹配，请明确重新选择目标。${errorText(error)}` : `状态读取失败：${errorText(error)}`) } return false } finally { end() }
   }
 
   const diagnose = async () => {
@@ -268,20 +297,12 @@ function FieldkitPanel(props: any) {
   }
 
   const legacy = describe?.mode === 'legacy-cli'
-  const steps = legacy ? LEGACY_STEPS : INTEGRATION_STEPS
   const identity = binding?.identity ?? snapshot?.identity
   const canAct = binding !== null && !binding?.expired && !busy
   const runActive = !!readRun && !isRunSettled(readRun)
   const canDiagnose = canAct && !runActive && (legacy || snapshot?.readiness?.ready === true)
-  const evidence = readRun?.evidence ?? []
-  const evidenceSteps = evidence.map((item: any, index: number) => evidenceStep(item, index, evidence, legacy))
   const warnings = binding?.observationWarnings ?? snapshot?.observationWarnings ?? []
-  const styles = {
-    card: { border: '1px solid var(--dsh-border, #3d4653)', borderRadius: 10, padding: 14, background: 'var(--dsh-bg-elevated, rgba(127,127,127,.08))' },
-    row: { display: 'flex', flexWrap: 'wrap' as const, gap: 8, alignItems: 'center' },
-    button: { padding: '7px 10px', borderRadius: 7, border: '1px solid var(--dsh-border, #667)', background: 'transparent', color: 'inherit', cursor: busy ? 'wait' : 'pointer' },
-    mono: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', whiteSpace: 'pre-wrap' as const, overflowWrap: 'anywhere' as const, maxHeight: 170, overflow: 'auto' as const },
-  }
+  const styles = panelStyles(busy)
 
   return React.createElement('main', { 'data-fieldkit-panel': '' },
     React.createElement('style', null, PANEL_CSS),
@@ -295,36 +316,17 @@ function FieldkitPanel(props: any) {
           React.createElement('button', { style: styles.button, disabled: !canDiagnose, onClick: diagnose }, legacy ? '六次离散 CLI 诊断' : '六步只读诊断'),
           React.createElement('button', { style: styles.button, disabled: !binding || busy, onClick: detach }, '取消选择 / 解除观察'),
         ),
+        !canDiagnose && React.createElement('p', null, `诊断不可用：${busy ? '操作进行中' : !binding ? '先明确选择目标' : binding.expired ? '观察已过期，请重新选择' : !snapshot ? '先读取缓存状态' : snapshot.readiness?.reasonCode ?? '读取门尚未开放'}。`),
         describe && React.createElement('p', null, `模式：${describe.mode}　协议：${text(describe.protocol)}　只读：是`),
         legacy && React.createElement('p', null, 'Legacy CLI 是六次离散命令采集，不是持续 owner 会话或同一时刻快照；不会自动回退。'),
         discovery.limited && React.createElement('p', { role: 'alert' }, `目标发现不完整：${text(discovery.reason)}`),
       ),
-      describe?.mode === 'service-v2' && React.createElement('section', { style: styles.card, 'aria-label': '服务设置' },
-        React.createElement('h2', null, '服务设置'),
-        React.createElement('p', null, '关闭页面或卸载插件只解除观察，服务保持独立运行。重新附着不会恢复设备连接、心跳或目标。'),
-        serviceSettings && (['toolPath', 'dataDir', 'port', 'runsDir', 'odrivePython'] as const).map(key => React.createElement('label', { key, style: { display: 'block', marginBottom: 8 } },
-          ({ toolPath: 'eha-tool 绝对路径', dataDir: '私有数据目录（0700）', port: '服务端口', runsDir: '记录目录（可选）', odrivePython: 'ODrive Python 绝对路径（可选）' })[key],
-          React.createElement('input', { value: serviceSettings[key], type: key === 'port' ? 'number' : 'text', min: key === 'port' ? 1 : undefined, max: key === 'port' ? 65535 : undefined, disabled: busy, style: { display: 'block', width: '100%', boxSizing: 'border-box' }, onChange: (event: React.ChangeEvent<HTMLInputElement>) => setServiceSettings({ ...serviceSettings, [key]: key === 'port' ? Number(event.target.value) : event.target.value }) }))),
-        React.createElement('div', { style: styles.row },
-          React.createElement('button', { style: styles.button, disabled: busy || !serviceSettings, onClick: () => manageService('save') }, '保存设置'),
-          React.createElement('button', { style: styles.button, disabled: busy || !serviceSettings, onClick: () => manageService('attach') }, '发现 / 附着服务'),
-          React.createElement('button', { style: styles.button, disabled: busy || !serviceSettings, onClick: () => manageService('start') }, '启动服务')),
-        serviceStatus?.error && React.createElement('p', { role: 'alert' }, errorText(serviceStatus.error)),
-        serviceStatus?.instance && React.createElement(React.Fragment, null,
-          React.createElement('p', null, `服务：${serviceStatus.instance.service_state}　版本：${serviceStatus.instance.tool_version}　实例：${serviceStatus.instance.instance_id}　PID：${serviceStatus.instance.pid}`),
-          React.createElement('p', null, `设备效果：${serviceStatus.instance.control_effect.state}（${text(serviceStatus.instance.control_effect.reason_code)}）；活动试验：${serviceStatus.instance.activity.trial_active ? '是' : '否'}；未决试验：${serviceStatus.instance.activity.trial_unresolved ? '是' : '否'}`),
-          serviceStatus.instance.sessions.map(item => React.createElement('p', { key: item.session_id }, `${item.session_id}：连接 ${item.connected ? '是' : '否'} / 心跳 ${item.heartbeat_active ? '活动' : '未活动'} / 记录 ${item.recording_active ? '活动' : '未活动'}`))),
-        React.createElement('label', { style: { display: 'block' } }, React.createElement('input', { type: 'checkbox', checked: shutdownConfirmed, disabled: busy, onChange: (event: React.ChangeEvent<HTMLInputElement>) => setShutdownConfirmed(event.target.checked) }), '我确认仅退出当前服务；不会发送设备 Stop，活动心跳、试验和未决效果需人工判断。'),
-        React.createElement('button', { style: styles.button, disabled: busy || !serviceStatus?.attached || !shutdownConfirmed, onClick: () => manageService('shutdown') }, '确认退出服务'),
-      ),
-      React.createElement('div', { style: styles.card }, React.createElement('h2', null, '目标'),
-        targets.length === 0 ? React.createElement('p', null, '未发现可用目标。') : targets.map((target: any) => React.createElement('div', { key: target.targetId, style: { ...styles.row, padding: '8px 0', borderTop: '1px solid var(--dsh-border, #334)' } },
-          React.createElement('strong', null, target.label),
-          React.createElement('span', null, target.transport),
-          React.createElement('span', null, target.connected ? '已连接' : '未连接'),
-          React.createElement('button', { style: styles.button, disabled: busy || (!target.canAttach && !target.canConnect), onClick: () => openTarget(target) }, target.connected ? '附着' : '连接'),
-        )),
-      ),
+      describe?.mode === 'service-v2' && React.createElement(ServiceSettings, { serviceSettings, serviceStatus, setServiceSettings, shutdownConfirmed, setShutdownConfirmed, busy, manageService }),
+      React.createElement('nav', { 'aria-label': 'Fieldkit 工作区', style: styles.row }, [['connections', '连接'], ['observe', '观察与诊断'], ['records', '记录 / ODrive']].map(([key, label]) => React.createElement('button', { key, 'aria-pressed': tab === key, onClick: () => setTab(key), style: styles.button }, label))),
+      tab === 'connections' && React.createElement(Connections, { remote, sessionId, capabilities: describe?.capabilities, instanceId: describe?.instanceId, targets, busy, openTarget, refresh }),
+      tab === 'records' && React.createElement(Recordings, { remote, sessionId, capabilities: describe?.capabilities }),
+      React.createElement('div', { style: { display: tab === 'observe' ? 'grid' : 'none', gap: 12 } },
+      React.createElement(Observation, { remote, sessionId, binding, enabled: describe?.capabilities?.includes('events'), visible: visible && tab === 'observe', onGap: readSnapshot }),
       React.createElement('div', { style: styles.card }, React.createElement('h2', null, '当前观察'),
         React.createElement('p', null, `UID：${text(identity?.uid)}　run_nonce：${text(identity?.runNonce)}　连接代次：${text(binding?.connectionGeneration ?? snapshot?.connectionGeneration)}`),
         binding?.expired && React.createElement('p', { role: 'alert' }, '绑定已过期；主动读取已停用，请重新选择目标。'),
@@ -334,23 +336,7 @@ function FieldkitPanel(props: any) {
           snapshot.controlEffect && React.createElement('p', { role: snapshot.controlEffect.state === 'unknown' ? 'alert' : undefined }, `设备效果：${snapshot.controlEffect.state}（${text(snapshot.controlEffect.reason_code)}）；读取成功不代表设备停止或安全。`),
           snapshot.nativeJsonText && React.createElement('pre', { style: styles.mono }, snapshot.nativeJsonText)),
       ),
-      React.createElement('div', { style: styles.card }, React.createElement('h2', null, '诊断进度'),
-        React.createElement('p', null, readRun ? `${readRun.status} · ${text(readRun.phase)} · 当前步骤：${text(STEP_LABELS[currentStep(readRun, legacy)] ?? currentStep(readRun, legacy))}` : '尚未开始。'),
-        React.createElement('ol', null, steps.map(step => React.createElement('li', { key: step }, `${evidenceSteps.includes(step) ? '已取得' : '等待'}：${STEP_LABELS[step]}`))),
-        evidence.map((item: any, index: number) => React.createElement('details', { key: `${item.action}-${index}` },
-          React.createElement('summary', null, `${STEP_LABELS[evidenceSteps[index]] ?? item.action} · ${text(item.receivedAt)}${item.error ? ` · ${errorText(item.error)}` : ''}`),
-          React.createElement('p', null, `连接代次：${text(item.connectionGeneration)}；来源时钟：${text(item.sourceTimestamp?.clock)} / ${text(item.sourceTimestamp?.value)}；接收年龄 ms：${text(item.receivedAgeMs)}`),
-          item.readPermit && React.createElement('p', null, `本步读取许可：${item.readPermit.ready ? '可读取' : '阻止'}（${text(item.readPermit.reason_code)}）；设备效果：${text(item.controlEffect?.state)}（${text(item.controlEffect?.reason_code)}）`),
-          item.exitCode !== undefined && React.createElement('p', null, `进程退出码：${text(item.exitCode)}；信号：${text(item.processError?.signal)}`),
-          item.parseError && React.createElement('p', { role: 'alert' }, `解析失败：${item.parseError}`),
-          item.dataUtf8 !== undefined && React.createElement('details', null, React.createElement('summary', null, '配置原始载荷'), React.createElement('pre', { style: styles.mono }, item.dataUtf8 ?? item.dataHex)),
-          React.createElement('pre', { style: styles.mono }, item.nativeJsonText ?? item.stdout ?? ''),
-          item.stderr && React.createElement('pre', { style: styles.mono }, item.stderr))),
-        readRun?.error && React.createElement('p', { role: 'alert' }, `首个错误：${errorText(readRun.error)}`),
-        readRun?.reports?.markdown && React.createElement('p', null, `Markdown 报告：${readRun.reports.markdown}`),
-        readRun?.reports?.json && React.createElement('p', null, `JSON 报告：${readRun.reports.json}`),
-        readRun?.reportError && React.createElement('p', { role: 'alert' }, `报告写入失败：${errorText(readRun.reportError)}`),
-      ),
+      React.createElement(Diagnostics, { readRun, legacy, remote, sessionId })),
       React.createElement('div', { style: styles.card }, React.createElement('h2', null, '离线配置检查'),
         React.createElement('textarea', { value: configText, onChange: (event: any) => setConfigText(event.target.value), placeholder: '粘贴完整配置原文；不会写入设备。', rows: 8, style: { width: '100%', boxSizing: 'border-box' } }),
         React.createElement('button', { style: styles.button, disabled: busy || configText.length === 0, onClick: checkConfiguration }, '检查原文配置'),

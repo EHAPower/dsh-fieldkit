@@ -1,3 +1,4 @@
+import { createP2Client } from './p2-client.js'
 import { open } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { isAbsolute } from 'node:path'
@@ -102,6 +103,7 @@ export function createIntegrationClient({ endpoint, tokenFile, fetchImpl = globa
   }
   const bindingPath = b => `/bindings/${encodeURIComponent(b.binding_id)}`
   return {
+    ...(apiVersion === 2 ? createP2Client(request) : {}),
     async describe(signal) {
       const value = await request('/describe', { signal })
       requireValue(value.dto_schema_version === 1 && value.config_format_version === 1 && text(value.tool_version), 'Incompatible DTO or configuration format version')

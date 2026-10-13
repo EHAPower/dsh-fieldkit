@@ -94,7 +94,7 @@ export function createOwnerProcess(config = {}, dependencies = {}) {
     return status()
   }
   const status = () => ({ settings: { ...(configured ?? defaults) }, attached: !!attached, description: attached?.description ?? null, instance: attached?.summary ?? null, error: null })
-  const discover = async () => { try { return await connect() } catch (error) { invalidate(); return { ...status(), error: { code: error.code ?? 'service_unavailable', message: error.code === 'credential_invalid' ? '凭据无效；请检查私有目录和 0600 凭据文件，勿覆盖运行中服务凭据。' : error.message } } } }
+  const discover = async () => { try { return await connect() } catch (error) { invalidate(); return { ...status(), error: { code: error.code ?? 'service_unavailable', message: ['credential_invalid', 'unauthorized'].includes(error.code) ? '凭据无效；请核对正确的 dataDir 私有目录和 0600 凭据文件，勿覆盖运行中服务凭据。' : error.message } } } }
   return {
     snapshot: status,
     status: () => serial(async () => { await load(); return discover() }),

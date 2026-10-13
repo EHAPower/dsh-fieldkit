@@ -311,3 +311,15 @@ test('v2 without lease capability cannot fall back to a persistent binding', asy
   const service = createFieldkitService(f.config, { owner: f.dependencies })
   await assert.rejects(service.listTargets('lease-chat'), /观察租约/)
 })
+
+test('HTTP unauthorized discovery gives actionable credential recovery without replacing credentials', async t => {
+  const f = await fixture(t)
+  await f.manager.save(f.settings); await f.publish()
+  f.client.describe = async () => { throw Object.assign(new Error('unauthorized'), { code: 'unauthorized' }) }
+  const result = await f.manager.status()
+  assert.equal(result.error.code, 'unauthorized')
+  assert.match(result.error.message, /dataDir/)
+  assert.match(result.error.message, /0600/)
+  assert.match(result.error.message, /勿覆盖/)
+  assert.equal(f.calls.filter(c => c[0] === 'spawn').length, 0)
+})

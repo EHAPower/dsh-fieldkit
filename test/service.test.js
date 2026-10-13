@@ -225,3 +225,16 @@ test('legacy omits USB candidates without a full serial instead of coercing null
   assert.match(list.discoveryReason, /without a full serial/)
   await assert.rejects(service.openTarget('chat-a', { targetId: 'null', intent: 'connect' }), /select a target/)
 })
+
+test('confirmed missing old binding is idempotent cleanup; unknown detach failures remain warnings', async () => {
+  const { service, integration } = setup()
+  await select(service)
+  let attempts = 0
+  integration.detach = async () => { attempts++; throw Object.assign(new Error('binding no longer exists'), { code: 'not_found' }) }
+  const next = await select(service)
+  assert.deepEqual(next.observationWarnings, [])
+  assert.equal(attempts, 1)
+  integration.detach = async () => { throw Object.assign(new Error('unknown detach timeout'), { code: 'sdk_timeout' }) }
+  const last = await select(service)
+  assert.deepEqual(last.observationWarnings.map(w => w.code), ['sdk_timeout'])
+})

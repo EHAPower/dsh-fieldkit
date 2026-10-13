@@ -85,7 +85,7 @@ async function main() {
     include: [join(root, 'src', 'remote.ts'), join(root, 'src', 'remote-types.ts')],
   })
   run(tsc, ['-p', join(scratch, 'tsconfig.runtime.json')], root)
-  await writeFile(join(scratch, 'client.tsdown.config.mjs'), `import { defineConfig } from 'tsdown'\nexport default defineConfig({ entry: { client: ${JSON.stringify(join(root, 'src', 'client.ts'))} }, outDir: ${JSON.stringify(join(root, 'lib'))}, format: 'cjs', clean: false, dts: false, outExtensions: () => ({ js: '.js' }), external: ['react', 'react/jsx-runtime', 'react-dom'], outputOptions: { banner: \"window.__ModuleLoader__.load({ id: '@ehapower/dsh-fieldkit', factory: (require) => { var module = { exports: {} }; var exports = module.exports;\", footer: 'return module.exports; } });' } })\n`)
+  await writeFile(join(scratch, 'client.tsdown.config.mjs'), `import { defineConfig } from 'tsdown'\nexport default defineConfig({ entry: { client: ${JSON.stringify(join(root, 'src', 'client.ts'))} }, outDir: ${JSON.stringify(join(root, 'lib'))}, format: 'cjs', inputOptions: (options) => { const { define, ...rest } = options; return { ...rest, transform: { ...rest.transform, define } } }, define: { 'process.env.NODE_ENV': '\"production\"' }, clean: false, dts: false, outExtensions: () => ({ js: '.js' }), external: ['react', 'react/jsx-runtime', 'react-dom'], outputOptions: { banner: \"window.__ModuleLoader__.load({ id: '@ehapower/dsh-fieldkit', factory: (require) => { var module = { exports: {} }; var exports = module.exports;\", footer: 'return module.exports; } });' } })\n`)
   run(tsdown, ['--config', join(scratch, 'client.tsdown.config.mjs')], root)
 }
 
