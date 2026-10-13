@@ -29,7 +29,13 @@ function operation(value) {
 }
 export function createP3Client(request) {
   const post = (path, instanceId, body, method = 'POST') => request(path, { instanceId, method, body: { instance_id: instanceId, ...body } })
+  async function maintenancePermissionView(binding) {
+    const value = await request(`/bindings/${identifier(binding.binding_id)}/permissions`, { instanceId: binding.instance_id })
+    check(value.binding_id === binding.binding_id && value.target_id === binding.target_id && value.expected_identity?.uid === binding.identity.uid && value.expected_identity?.run_nonce === binding.identity.run_nonce && value.connection_generation === binding.connection_generation && typeof value.permissions?.maintenance === 'boolean' && typeof value.permissions?.control === 'boolean' && (value.grant_id === null || typeof value.grant_id === 'string' && value.grant_id.length > 0), 'Invalid current permission metadata')
+    return { ...member(value), grantId: value.grant_id, maintenance: value.permissions.maintenance, control: value.permissions.control }
+  }
   return {
+    maintenancePermissionView,
     async configurationSchema(instanceId) {
       const value = await request('/config/schema', { instanceId })
       check(typeof value.native_json_text === 'string' && Number.isInteger(value.config_format_version), 'Invalid configuration schema')
@@ -41,11 +47,10 @@ export function createP3Client(request) {
     },
     async maintenancePermission(binding, enabled) {
       const path = `/bindings/${identifier(binding.binding_id)}/permissions`
-      const current = await request(path, { instanceId: binding.instance_id })
-      check(current.binding_id === binding.binding_id && current.expected_identity?.uid === binding.identity.uid && current.expected_identity?.run_nonce === binding.identity.run_nonce && current.connection_generation === binding.connection_generation && typeof current.permissions?.control === 'boolean' && (current.grant_id === null || typeof current.grant_id === 'string'), 'Invalid current permission metadata')
-      const value = await post(path, binding.instance_id, { ...gate(binding), permissions: { maintenance: enabled, control: current.permissions.control }, expected_grant_id: current.grant_id })
-      check(value.binding_id === binding.binding_id && value.permissions?.maintenance === enabled && value.permissions?.control === current.permissions.control, 'Invalid permission response')
-      check(enabled || current.permissions.control ? typeof value.grant_id === 'string' && value.grant_id.length > 0 : value.grant_id === null, 'Invalid permission grant')
+      const current = await maintenancePermissionView(binding)
+      const value = await post(path, binding.instance_id, { ...gate(binding), permissions: { maintenance: enabled, control: current.control }, expected_grant_id: current.grantId })
+      check(value.binding_id === binding.binding_id && value.permissions?.maintenance === enabled && value.permissions?.control === current.control, 'Invalid permission response')
+      check(enabled || current.control ? typeof value.grant_id === 'string' && value.grant_id.length > 0 : value.grant_id === null, 'Invalid permission grant')
       return { ...member(value), grantId: value.grant_id, maintenance: enabled }
     },
     async maintenanceReservation(binding, claimantId) {

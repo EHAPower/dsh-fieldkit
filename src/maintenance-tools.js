@@ -52,7 +52,7 @@ function operation(value) {
 function project(value, context = false) {
   const native = context ? value?.latestOperation?.nativeJsonText : value?.nativeJsonText
   const receipt = operation(context ? value?.latestOperation : value)
-  const result = context ? { target: target(value?.target), grant: grant(value?.grant), latestOperation: receipt } : receipt
+  const result = context ? { target: target(value?.target), grant: grant(value?.grant), permissionError: value?.permissionError ? { code: text(value.permissionError.code, 128), message: text(value.permissionError.message, 512) } : null, latestOperation: receipt } : receipt
   if (!result) return null
   result.evidenceBudgetBytes = budget
   result.evidenceIsExcerpt = false

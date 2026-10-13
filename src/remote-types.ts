@@ -331,7 +331,7 @@ export interface FieldkitMaintenanceReceipt {
   readonly error: FieldkitMaintenanceError | null
   readonly newSubmission?: boolean
 }
-export interface FieldkitMaintenanceContext { readonly target: FieldkitMaintenanceTarget | null; readonly grant: FieldkitMaintenanceGrant | null; readonly latestOperation: FieldkitMaintenanceReceipt | null }
+export interface FieldkitMaintenanceContext { readonly target: FieldkitMaintenanceTarget | null; readonly grant: FieldkitMaintenanceGrant | null; readonly permissionError?: FieldkitMaintenanceError | null; readonly latestOperation: FieldkitMaintenanceReceipt | null }
 export interface FieldkitConfigurationSchema { readonly nativeJsonText: string; readonly configFormatVersion: number }
 export interface FieldkitConfigurationValidation { readonly valid: true }
 export interface FieldkitConfigurationReadRequest { readonly bindingId: string; readonly view: 'factory' | 'startup' | 'user' }

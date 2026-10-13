@@ -256,3 +256,34 @@ for (const code of ['permission_denied', 'identity_changed']) test(`pre-registra
   assert.match(allText(ui), /not_submitted/); assert.match(allText(ui), /context unavailable/)
   assert.equal(ui.button('执行维护动作').props.disabled, true); assert.equal(invalidated.length, code === 'identity_changed' ? 1 : 0)
 })
+
+test('unconfirmed permission is visibly blocked without claiming revoke or clearing unknown evidence', async () => {
+  const unknown = receipt({ submission: 'unknown', controlEffect: 'unresolved', unknown: true, unknownSource: 'sdk' })
+  const ui = mount(baseRemote({ maintenanceContext: async () => success({ target, grant: null, permissionError: { code: 'sdk_timeout', message: '维护授权未确认：metadata timeout；请只读刷新。' }, latestOperation: unknown }) }))
+  await ui.settle(); await candidate(ui)
+  assert.match(allText(ui), /维护授权未确认.*metadata timeout/)
+  assert.doesNotMatch(allText(ui), /维护授权已撤销/)
+  assert.match(allText(ui), /本地提交：unknown/)
+  assert.equal(ui.button('执行维护动作').props.disabled, true)
+})
+
+test('permission GET preflight refusal is known never-submitted rather than a mutation unknown', async () => {
+  const ui = mount(baseRemote({ submitMaintenance: async () => ({ ok: false, error: { message: '维护授权未确认：metadata timeout；未提交维护。', details: { code: 'permission_unconfirmed', unknown: false } } }) }))
+  await ui.settle(); await candidate(ui); await ui.button('执行维护动作').props.onClick(); ui.render()
+  assert.match(allText(ui), /本地提交：not_submitted/)
+  assert.match(allText(ui), /维护授权未确认/)
+  assert.doesNotMatch(allText(ui), /设备效果未知|维护授权已撤销/)
+})
+
+test('changed shared grant leaves explicit human reauthorization available while maintenance stays blocked', async () => {
+  let grant = null, enabled = 0
+  const ui = mount(baseRemote({ maintenanceContext: async () => success({ target, grant, permissionError: grant ? null : { code: 'permission_changed', message: '原维护授权已变化；请重新明确人工授权。' }, latestOperation: null }), setMaintenancePermission: async (_, request) => { assert.equal(request.enabled, true); assert.deepEqual(JSON.parse(JSON.stringify(request.target)), target); enabled++; grant = { grantId: 'new-human-grant', target, maintenance: true }; return success(grant) } }))
+  await ui.settle(); await candidate(ui)
+  assert.equal(ui.button('执行维护动作').props.disabled, true)
+  ui.checkbox('明确启用当前目标维护权限').props.onChange({ target: { checked: true } }); ui.render()
+  assert.equal(ui.button('启用当前目标维护权限').props.disabled, false)
+  await ui.button('启用当前目标维护权限').props.onClick(); await ui.settle()
+  assert.equal(enabled, 1); assert.match(allText(ui), /当前完整身份已获 maintenance 授权/)
+  assert.doesNotMatch(allText(ui), /原维护授权已变化/)
+  assert.equal(ui.button('执行维护动作').props.disabled, true) // 新授权仍需新动作确认。
+})

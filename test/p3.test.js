@@ -14,7 +14,7 @@ function fixture(overrides = {}, recoveryJournal = { prepare: async () => 'synth
   let postCount = 0
   const sessions = new Map(), b = { id: 'local-binding', owner, target: { targetId: 'usb' }, expired: false }
   const value = { operationId: 'issued-1', reservationId: 'reservation', claimantId: 'chat', action: 'reset_application', controlEpoch: '2', members: [member], admission: 'attempting', submission: 'not_attempted', controlEffect: 'not_attempted', observation: 'unconfirmed', phase: 'submission', nativeJsonText: null, followUp: { reconnectRequired: false, readbackViews: [] }, error: null, newSubmission: true }
-  const client = { maintenancePermission: async (_b, enabled) => ({ ...member, grantId: enabled ? 'sdk-grant' : null, maintenance: enabled }), maintenanceReservation: async () => ({ reservationId: 'reservation', controlEpoch: '2', members: [member] }), maintenanceTicket: async () => ({ operationId: 'issued-1', controlEpoch: '2' }), submitMaintenance: async () => { postCount++; return value }, maintenanceOperation: async () => value, releaseMaintenanceReservation: async () => ({}), validateConfiguration: async () => ({ valid: true }), ...overrides }
+  const client = { maintenancePermissionView: async () => ({ ...member, maintenance: true, control: false }), maintenancePermission: async (_b, enabled) => ({ ...member, grantId: enabled ? 'sdk-grant' : null, maintenance: enabled }), maintenanceReservation: async () => ({ reservationId: 'reservation', controlEpoch: '2', members: [member] }), maintenanceTicket: async () => ({ operationId: 'issued-1', controlEpoch: '2' }), submitMaintenance: async () => { postCount++; return value }, maintenanceOperation: async () => value, releaseMaintenanceReservation: async () => ({}), validateConfiguration: async () => ({ valid: true }), ...overrides }
   b.client = client
   const service = createP3Service({ mode: 'service-v2', recoveryJournal, session: s => { if (!sessions.has(s)) sessions.set(s, { selectedBindingId: b.id }); return sessions.get(s) }, selected: s => { if (s !== 'chat' || b.expired) throw new Error('stale'); return b }, attach: async () => ({ instance_id: 'instance', capabilities: ['maintenance', 'maintenance_permissions', 'operation_read', 'config_validate'] }), http: () => client })
   const target = { instanceId: 'instance', bindingId: b.id, targetId: 'usb', uid, runNonce: nonce, connectionGeneration: '1' }
@@ -112,7 +112,7 @@ for (const code of ['identity_changed', 'binding_stale', 'permission_denied']) t
 test('querying an old revoked-grant receipt cannot revoke a newer explicit human grant', async () => {
   const f = fixture(); await f.grant(); Object.assign(f.value, { admission: 'finished', submission: 'not_submitted', controlEffect: 'not_attempted', error: { code: 'permission_denied', message: 'old grant rejected' } })
   await f.service.submitMaintenance('chat', { grantId: 'sdk-grant', action: 'reset_application' })
-  f.client.maintenancePermission = async () => ({ ...member, grantId: 'new-human-grant', maintenance: true })
+  f.client.maintenancePermission = async () => ({ ...member, grantId: 'new-human-grant', maintenance: true }); f.client.maintenancePermissionView = async () => ({ ...member, grantId: 'new-human-grant', maintenance: true, control: false })
   await f.grant(); await f.service.getMaintenanceOperation('chat', 'issued-1')
   assert.equal((await f.service.maintenanceContext('chat')).grant.grantId, 'new-human-grant')
 })
@@ -149,4 +149,81 @@ test('model-only maintenance intent survives Host recreation without browser rec
   const recovered = await fresh.recover('chat', recordId, { instanceId: 'instance', fetch: async (kind, instance, id) => { gets++; assert.deepEqual([kind, instance, id], ['maintenance', 'instance', 'issued-1']); return f.value } })
   assert.equal(recovered.result.results[0].unknownSource, 'sdk'); assert.equal(gets, 1)
   assert.equal(f.posts(), 1); assert.equal(reopened.posts(), 0)
+})
+
+test('shared grant rotation removes stale maintenance authorization without inheriting the new grant', async () => {
+  const f = fixture(); await f.grant()
+  f.client.maintenancePermissionView = async () => ({ ...member, grantId: 'rotated', maintenance: true, control: true })
+  const context = await f.service.maintenanceContext('chat')
+  assert.equal(context.grant, null); assert.equal(context.permissionError.code, 'permission_changed')
+  await assert.rejects(f.service.submitMaintenance('chat', { grantId: 'sdk-grant', action: 'reset_application' }), { code: 'permission_denied' })
+  assert.equal(f.posts(), 0)
+})
+test('unconfirmed maintenance permission blocks model submission but can be confirmed read-only later', async () => {
+  const f = fixture(); await f.grant()
+  f.client.maintenancePermissionView = async () => { throw Object.assign(new Error('metadata timeout'), { code: 'sdk_timeout' }) }
+  const context = await f.service.maintenanceContext('chat')
+  assert.equal(context.grant, null); assert.match(context.permissionError.message, /未确认/)
+  const tools = await createMaintenanceTools(f.service), projected = await tools[0].execute({}, { agent: { id: 'chat' } })
+  assert.equal(projected.grant, null); assert.match(projected.permissionError.message, /metadata timeout/)
+  await assert.rejects(f.service.submitMaintenance('chat', { grantId: 'sdk-grant', action: 'reset_application' }), { code: 'permission_unconfirmed', unknown: false })
+  assert.equal(f.posts(), 0)
+  f.client.maintenancePermissionView = async () => ({ ...member, maintenance: true, control: false })
+  assert.equal((await f.service.maintenanceContext('chat')).grant.grantId, 'sdk-grant')
+})
+test('late permission GET cannot restore a grant revoked during the read', async () => {
+  const f = fixture(); await f.grant(); let release
+  f.client.maintenancePermissionView = () => new Promise(resolve => { release = resolve })
+  const pending = f.service.maintenanceContext('chat'); await new Promise(resolve => setImmediate(resolve)); assert.equal(typeof release, 'function')
+  await f.service.setMaintenancePermission('chat', { target: f.target, enabled: false })
+  release({ ...member, maintenance: true, control: false })
+  await assert.rejects(pending, { code: 'binding_stale' }); assert.equal(f.posts(), 0)
+})
+test('permission metadata GET validates exact target and both flags without a POST', async () => {
+  const good = { binding_id: owner.binding_id, target_id: owner.target_id, expected_identity: owner.identity, connection_generation: '1', grant_id: 'sdk-grant', permissions: { maintenance: true, control: false } }
+  for (const changed of [{}, { target_id: 'other' }, { permissions: { control: false } }, { connection_generation: '2' }]) {
+    const calls = [], client = createP3Client(async (path, options) => { calls.push([path, options]); return { ...good, ...changed } })
+    if (Object.keys(changed).length) await assert.rejects(client.maintenancePermissionView(owner), { code: 'invalid_response' })
+    else assert.equal((await client.maintenancePermissionView(owner)).grantId, 'sdk-grant')
+    assert.equal(calls.length, 1); assert.equal(calls[0][1].method, undefined)
+  }
+})
+
+test('model maintenance checks live shared grant even without a preceding context refresh', async () => {
+  const f = fixture(); await f.grant()
+  f.client.maintenancePermissionView = async () => ({ ...member, grantId: 'p4-new-grant', maintenance: true, control: true })
+  const tools = await createMaintenanceTools(f.service)
+  await assert.rejects(tools[1].execute({ grantId: 'sdk-grant', action: 'reset_application' }, { agent: { id: 'chat' } }), { code: 'permission_denied', unknown: false })
+  assert.equal(f.posts(), 0)
+})
+test('permission rotation never clears an earlier SDK unknown maintenance receipt', async () => {
+  const f = fixture(); await f.grant()
+  Object.assign(f.value, { admission: 'finished', submission: 'unknown', controlEffect: 'unresolved' })
+  await f.service.submitMaintenance('chat', { grantId: 'sdk-grant', action: 'reset_application' })
+  f.client.maintenancePermissionView = async () => ({ ...member, grantId: 'rotated', maintenance: true, control: true })
+  const context = await f.service.maintenanceContext('chat')
+  assert.equal(context.grant, null); assert.equal(context.latestOperation.operationId, 'issued-1')
+  assert.equal(context.latestOperation.unknown, true); assert.equal(context.latestOperation.unknownSource, 'sdk')
+})
+
+test('cleared grant error belongs to its original target and never contaminates a newly selected target', async () => {
+  const f = fixture(); await f.grant()
+  f.client.maintenancePermissionView = async () => ({ ...member, grantId: 'rotated', maintenance: true, control: true })
+  assert.equal((await f.service.maintenanceContext('chat')).permissionError.code, 'permission_changed')
+  f.b.owner = { ...owner, target_id: 'other', identity: { uid: 'c'.repeat(24), run_nonce: 'd'.repeat(32) } }; f.b.target = { targetId: 'other' }
+  const fresh = await f.service.maintenanceContext('chat')
+  assert.equal(fresh.target.targetId, 'other'); assert.equal(fresh.grant, null); assert.equal(fresh.permissionError, null)
+})
+for (const changed of ['target', 'grant']) test(`late failed permission GET cannot contaminate changed ${changed}`, async () => {
+  const f = fixture(); await f.grant(); let reject
+  f.client.maintenancePermissionView = () => new Promise((_, r) => { reject = r })
+  const pending = f.service.maintenanceContext('chat'); await new Promise(resolve => setImmediate(resolve))
+  if (changed === 'target') { f.b.owner = { ...owner, target_id: 'other' }; f.b.target = { targetId: 'other' } }
+  else { f.client.maintenancePermission = async () => ({ ...member, grantId: 'new-human-grant', maintenance: true }); await f.grant() }
+  reject(Object.assign(new Error('old metadata timeout'), { code: 'sdk_timeout' }))
+  await assert.rejects(pending, { code: 'binding_stale' })
+  f.client.maintenancePermissionView = async () => ({ ...member, grantId: 'new-human-grant', maintenance: true, control: false })
+  const fresh = await f.service.maintenanceContext('chat')
+  if (changed === 'grant') assert.equal(fresh.grant.grantId, 'new-human-grant')
+  assert.equal(fresh.permissionError, null); assert.equal(f.posts(), 0)
 })

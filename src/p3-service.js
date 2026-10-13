@@ -26,6 +26,24 @@ export function createP3Service({ mode, session, selected, attach, http, invalid
     return b
   }
   function target(s) { try { return targetOf(binding(s)) } catch { return null } }
+  async function verifiedGrant(s, b, c) {
+    const grant = c.grant, current = targetOf(b)
+    if (!grant) return { grant: null, permissionError: c.permissionError ?? null }
+    let value, readError
+    try {
+      value = await b.client.maintenancePermissionView(b.owner)
+      if (!matchesMember(value, current) || value.bindingId !== b.owner.binding_id || typeof value.maintenance !== 'boolean' || typeof value.control !== 'boolean') fail('invalid_response', '权限读取与原完整身份不一致。')
+    } catch (error) { readError = error }
+    if (c.grant !== grant || !same(target(s), current)) fail('binding_stale', '权限读取期间原目标或人工授权已变化；丢弃旧读取，请只读刷新。')
+    if (readError) return { grant: null, permissionError: { code: readError.code ?? 'backend_error', message: `维护授权未确认：${readError.message}；请只读刷新，不自动重发维护。` } }
+    if (!value.maintenance || value.grantId !== grant.grantId) {
+      c.grant = null
+      c.permissionErrorTarget = current
+      c.permissionError = { code: 'permission_changed', message: '原维护授权已变化；未继承新 grant，请重新明确人工授权后再请求动作。' }
+      return { grant: null, permissionError: c.permissionError }
+    }
+    return { grant: clone(grant), permissionError: null }
+  }
   function registered(s, id) { context(s); const record = operations.get(id); if (!record || record.sessionId !== s) fail('not_found', '当前对话未登记该维护记录。'); return record }
   function receipt(record) { return clone(record.receipt) }
   function invalidateReceipt(record) {
@@ -76,9 +94,13 @@ export function createP3Service({ mode, session, selected, attach, http, invalid
     },
     async maintenanceContext(s) {
       await ready(s, 'maintenance')
-      const c = context(s), current = target(s)
+      const c = context(s), current = target(s), revision = c.permissionRevision
       if (c.grant && !same(c.grant.target, current)) c.grant = null
-      return { target: current, grant: clone(c.grant), latestOperation: c.latestOperationId ? receipt(registered(s, c.latestOperationId)) : null }
+      if (c.permissionError && !same(c.permissionErrorTarget, current)) { c.permissionError = null; c.permissionErrorTarget = null }
+      const permissions = current ? await verifiedGrant(s, binding(s), c) : { grant: null, permissionError: null }
+      const latestTarget = target(s)
+      if ((current || latestTarget) && !same(current, latestTarget) || revision !== c.permissionRevision) fail('binding_stale', '维护 context 读取期间原目标或人工授权已变化；丢弃旧读取。')
+      return { target: current, ...permissions, latestOperation: c.latestOperationId ? receipt(registered(s, c.latestOperationId)) : null }
     },
     async setMaintenancePermission(s, request) {
       fields(request, ['target', 'enabled'])
@@ -89,7 +111,7 @@ export function createP3Service({ mode, session, selected, attach, http, invalid
       const previous = uidClaims.get(current.uid)
       if (request.enabled && previous && (previous.receipt?.unknown || same(previous.receipt?.target, current))) fail('maintenance_busy', '原维护已提交或结果未知；请核对原记录并明确重连，不重新提交。')
       const revision = c.permissionRevision = (c.permissionRevision ?? 0) + 1
-      c.grant = null
+      c.grant = null; c.permissionError = null; c.permissionErrorTarget = null
       const value = await b.client.maintenancePermission(b.owner, request.enabled)
       if (!matchesMember(value, current) || value.bindingId !== b.owner.binding_id) fail('invalid_response', '权限回执身份不匹配。')
       // Recheck selection after async permission response; no stale grant is exposed.
@@ -105,6 +127,8 @@ export function createP3Service({ mode, session, selected, attach, http, invalid
       await ready(s, 'maintenance')
       const b = binding(s), current = targetOf(b), c = context(s), grant = c.grant
       if (!grant || grant.grantId !== request.grantId || !same(grant.target, current)) fail('permission_denied', '需要人类为当前完整身份明确启用维护权限。')
+      const permission = await verifiedGrant(s, b, c)
+      if (!permission.grant) throw Object.assign(new Error(permission.permissionError?.message ?? '维护授权未确认；未提交维护。'), { code: c.grant === grant ? 'permission_unconfirmed' : 'permission_denied', unknown: false })
       if (busy()) fail('busy', '读取或连接操作尚在处理。')
       const prior = uidClaims.get(current.uid)
       if (prior && (prior.receipt?.unknown || prior.receipt?.admission !== 'finished' || same(prior.receipt?.target, current))) fail('maintenance_busy', '该 UID 已有维护提交或未知记录；请核对原记录，不重试。')

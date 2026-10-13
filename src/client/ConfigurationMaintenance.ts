@@ -130,7 +130,7 @@ export function ConfigurationMaintenance({ remote, sessionId, binding, busy, onR
       remember(receipt)
       return receipt
     } catch (error: any) {
-      const rejected = error.unknown !== true && ['bad_request', 'permission_denied', 'unsupported', 'busy', 'maintenance_busy', 'binding_stale', 'identity_changed', 'instance_mismatch', 'permission_revoked', 'permission_conflict'].includes(error.code)
+      const rejected = error.unknown !== true && ['bad_request', 'permission_denied', 'unsupported', 'busy', 'maintenance_busy', 'binding_stale', 'identity_changed', 'instance_mismatch', 'permission_revoked', 'permission_conflict', 'permission_unconfirmed'].includes(error.code)
       // UI记录没有伪造SDK operationId；确定提交前拒绝与传输不明分开。
       const receipt: Receipt = { grantId: request.grantId, error: { code: typeof error.code === 'string' ? error.code : 'backend_error', message: errorText(error) }, target: request.target, action: request.action, admission: rejected ? 'rejected_before_submission' : 'unknown', submission: rejected ? 'not_submitted' : 'submission_unknown', controlEffect: rejected ? 'not_attempted' : 'unresolved', unknown: !rejected, unknownSource: rejected ? null : 'transport', nativeJsonText: errorText(error) }
       remember(receipt)
@@ -152,7 +152,8 @@ export function ConfigurationMaintenance({ remote, sessionId, binding, busy, onR
     React.createElement('section', { style: styles.card },
       React.createElement('button', { style: styles.button, disabled: busy || working || !supports('maintenance'), onClick: async () => { await reloadLatest.current?.(); if (active()) await onRefresh() } }, '刷新维护记录'),
       notice && React.createElement('p', { role: 'status' }, notice),
-      gateReason && React.createElement('p', { role: 'status' }, gateReason)),
+      gateReason && React.createElement('p', { role: 'status' }, gateReason),
+      state.context?.permissionError && React.createElement('p', { role: 'status' }, state.context.permissionError.message)),
     React.createElement(Configuration, { key: `configuration:${childKey}`, rawText: state.raw, records: state.records, schema, nativeSchemaText: state.schema?.nativeJsonText, busy: busy || working,
       onChange: (rawText: string) => { rawRevision.current++; display(current => ({ ...current, raw: rawText, validation: null })) },
       onValidate: (rawText: string) => foreground(async () => {
@@ -171,7 +172,7 @@ export function ConfigurationMaintenance({ remote, sessionId, binding, busy, onR
     ...Object.values(state.evidence).map(record => React.createElement('details', { key: record.view }, React.createElement('summary', null, `${record.view} SDK 读取证据`),
       record.dataUtf8 === null && React.createElement('p', null, 'SDK 未返回配置 UTF-8 原文；证据不能作为候选配置。'), React.createElement('pre', { style: styles.mono }, record.nativeJsonText), React.createElement('pre', { style: styles.mono }, `dataHex: ${record.dataHex}`))),
     React.createElement('label', null, '已交付的更新恢复路径 ', React.createElement('input', { value: state.recoveryPath, disabled: busy || working, onChange: (event: React.ChangeEvent<HTMLInputElement>) => display(current => ({ ...current, recoveryPath: event.target.value })) })),
-    React.createElement(Maintenance, { key: `maintenance:${childKey}`, target, permission: state.context?.grant, rawText: state.raw, validation: state.validation, gateReason, recoveryPath: state.recoveryPath, receipt: state.receipt, busy: busy || working,
+    React.createElement(Maintenance, { key: `maintenance:${childKey}`, target, permission: state.context?.grant, actionReasons: state.context?.permissionError ? { save_and_restart: state.context.permissionError.message, restore_factory_and_restart: state.context.permissionError.message, reset_application: state.context.permissionError.message, enter_update: state.context.permissionError.message } : undefined, rawText: state.raw, validation: state.validation, gateReason, recoveryPath: state.recoveryPath, receipt: state.receipt, busy: busy || working,
       onEnable: (permissionTarget: FieldkitMaintenanceTarget) => changePermission(permissionTarget, true), onDisable: (grant: { target: FieldkitMaintenanceTarget }) => changePermission(grant.target, false), onSubmit: submit,
       onReadback: (readTarget: FieldkitMaintenanceTarget, view: 'user' | 'startup') => foreground(async () => { if (scope(readTarget) !== scope(target)) throw new Error('当前读回目标已变化。'); await readRecord(view) }) }),
     state.receipt && React.createElement('section', { style: styles.card },
