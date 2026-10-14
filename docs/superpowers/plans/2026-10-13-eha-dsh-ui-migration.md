@@ -1,4 +1,6 @@
-# EHA 统一 DSH 界面迁移计划
+> **已被替代（2026-10-14）。** 本计划记录旧 P0–P6 迁移方向及其历史审计背景，不再定义当前交付。现行目标、边界和实施顺序见[2026-10-14 EHA 命令工作台计划](2026-10-14-eha-command-workbench.md)：官方 DSH 不改，插件直接转发 `eha-tool serve --direct-api` 的既有 Workbench / ToolSession 命令，不再保留插件 grant、reservation、claim、scope、epoch、journal 或 unknown 后续锁；旧 WebUI 冻结弃用但本次不删除。
+
+# EHA 统一 DSH 界面迁移计划（历史）
 
 > 状态：实施中。用户于 2026-10-13 另行明确授权本地实现、分阶段提交及既定设备范围内的验收；没有授权推送、正式发布或提前删除旧界面。阶段证据与剩余门槛见 [迁移进度](../../eha-migration-progress.md)，每个阶段独立验收。
 

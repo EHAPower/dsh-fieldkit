@@ -61,7 +61,7 @@ export function createOwnerProcess(config = {}, dependencies = {}) {
   const root = dependencies.settingsRoot ?? userDataDirectory()
   const configFile = join(root, 'settings.json')
   const defaults = settings({ toolPath: config.toolPath ?? '', port: config.servicePort ?? 18080, dataDir: config.serviceDataDir || join(root, 'service'), runsDir: config.runsDir ?? '', odrivePython: config.odrivePython ?? '' })
-  let configured = null, attached = null, queue = Promise.resolve(), disposed = false, startUnresolved = false
+  let configured = null, attached = null, queue = Promise.resolve(), disposed = false
   const serial = fn => { const task = queue.then(() => { if (disposed) fail('disposed', '插件已卸载。'); return fn() }); queue = task.catch(() => {}); return task }
   const invalidate = () => { attached = null; dependencies.onInvalidate?.() }
   const load = async () => {
@@ -86,11 +86,11 @@ export function createOwnerProcess(config = {}, dependencies = {}) {
     if (record.endpoint !== `http://127.0.0.1:${value.port}` || record.token_file !== expected.tokenFile) fail('instance_mismatch', '发现记录的端点或凭据位置与配置不同；请核对端口和私有数据目录。')
     const client = (dependencies.createClient ?? createIntegrationClient)({ endpoint: record.endpoint, tokenFile: expected.tokenFile, apiVersion: 2 })
     const description = await client.describe()
-    if (description.instance_id !== record.instance_id || description.tool_version !== record.tool_version || !['instance_status', 'service_shutdown'].every(c => description.capabilities.includes(c))) fail('instance_mismatch', '认证后的服务实例或版本与发现记录不同；请重新发现。')
+    if (description.instance_id !== record.instance_id || description.tool_version !== record.tool_version || !['instance_status', 'service_shutdown', 'direct_api'].every(c => description.capabilities.includes(c))) fail('instance_mismatch', '认证后的服务实例、版本或 direct_api 能力不同；请重新发现。')
     const summary = await client.instance(record.instance_id)
     if (summary.endpoint !== record.endpoint || summary.pid !== record.pid || summary.started_at_unix_ms !== record.started_at_unix_ms || summary.tool_version !== record.tool_version || summary.service_state !== 'running') fail('instance_mismatch', '服务概要与发现记录不同或服务正在退出；请重新发现。')
     if (attached && attached.description.instance_id !== description.instance_id) invalidate()
-    attached = { client, description, summary }; startUnresolved = false
+    attached = { client, description, summary }
     return status()
   }
   const status = () => ({ settings: { ...(configured ?? defaults) }, attached: !!attached, description: attached?.description ?? null, instance: attached?.summary ?? null, error: null })
@@ -117,7 +117,6 @@ export function createOwnerProcess(config = {}, dependencies = {}) {
       if (existing.attached) return existing
       // Only absence permits starting: never overwrite a stale, foreign, or unauthenticated record.
       if (existing.error?.code !== 'service_missing') fail('start_blocked', '已有服务记录无法认证；请检查进程、端口、版本和私有目录后人工处理。不会覆盖或终止现有实例。')
-      if (startUnresolved) fail('start_unknown', '上次启动结果仍未知；请先发现服务并人工核对进程和端口，不重复启动。')
       // Probe only help with bounded output; the independent service must not inherit a DSH stderr pipe.
       await new Promise((resolve, reject) => {
         const done = (error, _stdout, stderr = '') => {
@@ -130,17 +129,16 @@ export function createOwnerProcess(config = {}, dependencies = {}) {
         catch { done({ code: null }) }
       })
       const { instanceFile, tokenFile } = paths(value)
-      const args = ['serve', '--port', String(value.port), '--token-file', tokenFile, '--instance-file', instanceFile]
+      const args = ['serve', '--direct-api', '--port', String(value.port), '--token-file', tokenFile, '--instance-file', instanceFile]
       if (value.runsDir) args.push('--runs-dir', value.runsDir)
       if (value.odrivePython) args.push('--odrive-python', value.odrivePython)
-      startUnresolved = true
       let readyInstance
       await new Promise((resolve, reject) => {
         let child, buffer = '', settled = false
         const finish = (error) => {
           if (settled) return; settled = true; clearTimeout(timer)
           child?.stdout?.destroy(); child?.unref()
-          if (error) { if (error.code === 'start_failed') startUnresolved = false; reject(error) } else resolve()
+          if (error) reject(error); else resolve()
         }
         const timer = setTimeout(() => finish(Object.assign(new Error('启动等待超时；结果未知，请点击发现服务核对，不自动重试。'), { code: 'start_unknown' })), dependencies.startTimeoutMs ?? 10000)
         try { child = (dependencies.spawnImpl ?? spawn)(value.toolPath, args, { shell: false, detached: true, stdio: ['ignore', 'pipe', 'ignore'] }) }
@@ -165,9 +163,9 @@ export function createOwnerProcess(config = {}, dependencies = {}) {
       return connected
     }),
     shutdown: request => serial(async () => {
-      if (!request || Object.keys(request).some(k => !['instanceId', 'confirmation'].includes(k)) || request.confirmation !== 'shutdown_service_without_stopping_devices' || !attached || request.instanceId !== attached.description.instance_id) fail('confirmation_required', '请核对当前实例，并人工明确确认仅退出服务、不停止设备。')
+      if (!request || Object.keys(request).some(key => key !== 'instanceId') || !attached || request.instanceId !== attached.description.instance_id) fail('instance_mismatch', '请刷新服务并选择当前实例。')
       const current = attached
-      try { const result = await current.client.shutdown(request.instanceId, request.confirmation); return { ...status(), attached: false, instance: result } }
+      try { const result = await current.client.shutdown(request.instanceId, 'shutdown_service_without_stopping_devices'); return { ...status(), attached: false, instance: result } }
       finally { invalidate() }
     }),
     client() { if (!attached) fail('service_unavailable', '服务尚未附着；请发现或启动服务。'); return attached.client },

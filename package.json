@@ -1,7 +1,7 @@
 {
   "name": "@ehapower/dsh-fieldkit",
   "version": "0.2.0",
-  "description": "Public EHA SDK diagnostic workflows for DeepSeek Harness",
+  "description": "Official eha-tool command workbench for DeepSeek Harness",
   "type": "module",
   "main": "./src/index.js",
   "exports": {
@@ -19,8 +19,7 @@
     "lib",
     "skills",
     "cordis.patch.yml",
-    "README.md",
-    "licenses"
+    "README.md"
   ],
   "engines": {
     "node": ">=22"
@@ -71,7 +70,6 @@
     "@deepseek-ai/dsh-typert-protocol": "0.2.0-rc.2",
     "@deepseek-ai/dsh-user-approval": "0.2.0-rc.2",
     "@deepseek-ai/schemastery": "~3.18.4",
-    "echarts": "6.1.0",
     "tsdown": "0.12.9",
     "typescript": "5.9.3",
     "zod": "4.4.3"

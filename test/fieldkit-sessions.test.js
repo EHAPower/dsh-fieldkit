@@ -67,12 +67,12 @@ test('actual chooser only switches on explicit return, serializes clicks, and pr
   let finish, selects = 0
   const manager = { list: async () => ({ items: [{ id: 'old', visitedAt: null }], warning: null, truncated: false }), select: async (_, id) => { assert.equal(id, 'old'); selects++; await new Promise(resolve => { finish = resolve }) } }
   const ui = mountSwitcher(manager)
-  await ui.button('读取既有 Fieldkit 会话').props.onClick(); ui.render(); assert.equal(ui.switched(), 0)
+  await ui.button('查看已有对话').props.onClick(); ui.render(); assert.equal(ui.switched(), 0)
   ui.choose('old'); assert.equal(ui.switched(), 0)
-  const click = ui.button('明确返回所选会话').props.onClick; const pending = click(); await click(); assert.equal(selects, 1); assert.equal(ui.switched(), 0)
+  const click = ui.button('打开所选对话').props.onClick; const pending = click(); await click(); assert.equal(selects, 1); assert.equal(ui.switched(), 0)
   finish(); await pending; assert.equal(ui.switched(), 1)
   manager.select = async () => { throw new Error('catalog unavailable') }
-  await ui.button('明确返回所选会话').props.onClick(); ui.render()
+  await ui.button('打开所选对话').props.onClick(); ui.render()
   assert.equal(ui.switched(), 1); assert.match(JSON.stringify(ui.nodes()), /catalog unavailable/)
 })
 test('actual parent replaces the whole panel key on explicit selection and retains official provider lifecycle', async () => {
@@ -83,14 +83,10 @@ test('actual parent replaces the whole panel key on explicit selection and retai
   vm.runInNewContext(ts.transpileModule(parent + '\nglobalThis.renderParent=FieldkitSessionPanel', { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context)
   const before = context.renderParent({ manager: 'same' }); before.props.onSessionSelected(); const after = context.renderParent({ manager: 'same' })
   assert.notEqual(before.props.key, after.props.key); assert.equal(before.type, after.type)
-  // Execute the real retain effect: official reference feeds SessionProvider, teardown releases observation only.
-  const start = source.indexOf('  useEffect(() => {\n    mounted.current = true')
-  const end = source.indexOf('\n\n  useEffect', start)
-  const calls = []; let cleanup; let id; let reference
-  const effectContext = { useEffect: fn => { cleanup = fn() }, mounted: { current: false }, epoch: { current: 0 }, runEpoch: { current: 0 }, bindingRef: { current: { bindingId: 'old-binding' } }, ensureSession: async () => 'old-empty', sessions: { retain: (session, options) => { calls.push(['retain', session, options.source]); return { release: () => calls.push(['release']) } } }, remote: { detachTarget: async (...args) => calls.push(['detach', ...args]) }, setSessionId: value => { id = value }, setReference: value => { reference = value }, setNotice() {}, errorText: String }
-  vm.runInNewContext(ts.transpileModule(source.slice(start, end), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, effectContext)
-  await new Promise(resolve => setImmediate(resolve)); assert.equal(id, 'old-empty'); assert.equal(typeof reference.release, 'function')
-  cleanup(); assert.deepEqual(calls.map(c => c[0]), ['retain', 'release', 'detach'])
+  // FieldkitPanel retains only the official conversation reference and releases it on teardown.
+  assert.match(source, /held = sessions\.retain\(id, \{ source: 'fieldkit' \}\)/)
+  assert.match(source, /held\?\.release\(\)/)
+  assert.doesNotMatch(source, /detachTarget|bindingId|mounted\.current/)
   assert.match(source, /SessionProvider, \{ session: reference \}/)
 })
 test('session manager and chooser typecheck under strict TypeScript', () => {

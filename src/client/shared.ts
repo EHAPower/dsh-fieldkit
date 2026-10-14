@@ -6,7 +6,7 @@ export function errorText(error: any) {
   const code = error?.code ?? error?.kind ?? error?.error?.code
   const message = error?.message ?? error?.error?.message ?? String(error)
   const summary = code ? `${code}：${message}` : message
-  return error?.unknown === true ? `${summary}（结果未知；请先核对状态，不要自动重试）` : summary
+  return error?.unknown === true ? `${summary}（结果未知）` : summary
 }
 
 export function valueOf(result: any) {
@@ -26,5 +26,3 @@ export function panelStyles(busy = false) {
     mono: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', whiteSpace: 'pre-wrap' as const, overflowWrap: 'anywhere' as const, maxHeight: 170, overflow: 'auto' as const },
   }
 }
-
-export function isExpiredBindingError(error: any) { return ['identity_changed', 'binding_stale', 'not_found', 'instance_mismatch'].includes(error?.code) }
