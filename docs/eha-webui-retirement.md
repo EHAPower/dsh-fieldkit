@@ -1,18 +1,17 @@
-# 旧 eha-tool WebUI 冻结说明
+# eha-tool WebUI 维护说明
 
-`eha-tool webui` 已冻结并弃用。它在当前发行中仍可运行，供既有用户继续使用；本次命令工作台迁移不会删除、禁用或修改它。
+2026-10-14 的最终决定是：Fieldkit 冻结，SDK 中为 DSH 增加的支持已撤销，`eha-tool webui` 恢复并继续维护。此前针对 WebUI 的冻结、弃用及未来删除计划已撤销；DSH 不再承担 EHA 图形界面迁移目标。
 
-## 冻结范围
+## 维护范围
 
-- 不再为旧页面新增功能。
-- 不再更新仅服务于旧页面的实现、页面资源或页面测试。
-- 不把插件的新功能回填到旧页面。
-- 不把 WebUI 的可用性当成插件交付、验收或故障恢复前置条件。
+- WebUI 的功能、专属实现、页面资源和测试可继续在 eha-sdk 中更新。
+- WebUI、CLI 与 Shell 继续复用 SDK；保留独立的 ODrive 只读桥接退出与诊断修复。
+- Fieldkit 不再开发或维护，不要求把 WebUI 功能同步到插件。
 
-冻结不包含独立 `eha-tool` 服务、CLI、Shell、SDK 共享实现、历史数据或命令语义；这些仍是插件所复用的官方能力。
+为 DSH 引入的独立服务、集成接口、`serve --direct-api` 及配套调度已从 SDK 撤销，Firmware 已更新 SDK 引用。原 CLI、Shell 和 WebUI 后端结构已恢复，既有历史数据和验收记录保留。当前插件不兼容撤销后的 SDK，重启 DSH 或服务不能恢复兼容性。
 
-## 后续删除
+## 历史决定
 
-旧 WebUI 计划在未来的 SDK 独立发布中删除。删除工作届时再根据实际消费者、发布兼容说明和 SDK 代码制定，不预先承诺日期、版本或别名。本次不删除文件、路由、命令、用户配置、历史 runs 或第三方许可。
+此前曾计划由 DSH 承担唯一图形界面，随后将 WebUI 标记冻结、弃用并计划未来删除；这些要求均已撤销。中间阶段“WebUI 与 DSH 插件并存维护”的方向也已被最终冻结 Fieldkit、撤销 SDK DSH 支持的决定替代。
 
-插件的当前交付是接入 `eha-tool serve --direct-api` 的 Workbench / ToolSession，而不是替旧 WebUI 维护另一份页面功能。具体实施状态见[迁移进度](eha-migration-progress.md)与[命令工作台计划](superpowers/plans/2026-10-14-eha-command-workbench.md)。
+[迁移记录](eha-migration-progress.md)、[用户旅程](eha-user-journey.md)和[命令工作台计划](superpowers/plans/2026-10-14-eha-command-workbench.md)保留当时的实现与验收事实，不再构成当前开发或验收任务。
