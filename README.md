@@ -1,10 +1,12 @@
 # @ehapower/dsh-fieldkit
 
+> **冻结（2026-10-14）**：本仓库自即日起不再开发或维护。SDK 中的 DSH 服务、直通接口及其配套改动已撤销，本插件不再兼容撤销后的 SDK；请使用继续维护的 `eha-tool webui`。下文的安装、服务、架构和操作说明仅保留为历史参考，重新启动 DSH 或服务不会恢复兼容性。
+
 面向现场支持人员的 DeepSeek Harness 插件。目标是一个简单的 EHA 命令工作台：选择已连接目标，填写官方 `eha-tool` 命令表单，执行并查看官方的原始输出。按钮操作不需要模型调用；右侧保留原生对话，用于解释已经得到的结果。
 
 设备连接、协议和命令执行由公开 [`eha-sdk`](https://github.com/EHAPower/eha-sdk) 的 `eha-tool` 持有。插件通过 `eha-tool serve --direct-api` 直通既有 `/api` Workbench / ToolSession，不复制协议，也不在插件内增加授权、占用、范围、epoch、日志账本或以 unknown 为由的后续操作锁。命令结果无论成功、失败还是 unknown 都原样显示；unknown 是这一次执行的事实，不会改变下一次表单是否可执行。
 
-> 新版已部署到 nzh-mbpm1 的官方 DSH 试用 profile。构建、34 项测试、独立审查及 USB 只读操作与对话联动已验证；具体范围见[迁移进度](docs/eha-migration-progress.md)。
+> 冻结前的版本曾部署到 nzh-mbpm1 的官方 DSH 试用 profile；2026-10-14 已按用户要求停止相关服务及本机转发。构建、34 项测试、独立审查及 USB 只读操作与对话联动的历史验证范围见[迁移进度](docs/eha-migration-progress.md)。
 
 ## 兼容范围
 
@@ -14,7 +16,7 @@
 | eha-tool 服务 | `serve --direct-api` 提供既有 Workbench / ToolSession `/api`。 |
 | 主机 | 原生 eha-tool 在目标主机运行；开发和软件验证在 devbox 中执行。 |
 | 命令表单 | 只列出官方 Workbench 已提供的命令和参数，不接受 Shell 文本。 |
-| 旧 WebUI | `eha-tool webui` 冻结、弃用但当前仍可用；本次不删除。 |
+| WebUI | `eha-tool webui` 继续使用和维护。 |
 
 所用 eha-tool 必须来自包含 `serve --direct-api` 的 SDK 版本。版本、服务或认证不可用时，工作台显示原始错误；不会改用别的实现或重写为本地设备协议。
 
@@ -96,6 +98,6 @@ dsh --profile fieldkit --no-open
 
 配置原文和官方 `native_json_text` 不经 JavaScript 数值转换再写回。设备输出是结果文本，不是插件可执行的指令。
 
-## 旧 WebUI
+## WebUI
 
-`eha-tool webui` 已冻结、弃用，当前版本仍可运行。本仓不会为它新增功能或更新其专属实现，本次也不会删除它。未来删除时会在 SDK 的独立发布中处理；CLI、Shell、独立服务和历史数据不属于这个冻结范围。
+`eha-tool webui` 继续作为独立图形界面使用和维护。此前的冻结、弃用及未来删除计划已撤销；其页面资源、专属实现和测试可继续在 eha-sdk 中更新。
